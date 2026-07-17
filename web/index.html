@@ -1,0 +1,213 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Palette Studio</title>
+    <link rel="stylesheet" href="/styles.css" />
+    <script defer src="/lucide.min.js"></script>
+    <script defer src="/app.js"></script>
+  </head>
+  <body>
+    <div class="shell">
+      <aside class="sidebar" aria-label="Library">
+        <div class="brand-row">
+          <div class="brand-mark" id="libraryMark">PS</div>
+          <div>
+            <button class="brand-name" id="libraryName" title="Rename library">Palette Studio</button>
+            <div class="brand-subtitle" id="librarySubtitle">0 assets</div>
+          </div>
+        </div>
+
+        <nav class="nav-block" id="statusNav">
+          <button class="nav-item active" data-filter="all">
+            <i data-lucide="images"></i><span>All</span><strong data-count="all">0</strong>
+          </button>
+          <button class="nav-item" id="cullMode">
+            <i data-lucide="list-checks"></i><span>Review</span>
+          </button>
+        </nav>
+
+        <div class="side-section">
+          <div class="side-label">Handles</div>
+          <div id="handleList" class="handle-list"></div>
+        </div>
+
+        <div class="side-section shoots-section">
+          <div class="side-label side-label-row"><span>Shoots</span><button class="icon-button compact-icon" id="newShoot" title="New shoot"><i data-lucide="plus"></i></button></div>
+          <div id="shootList" class="shoot-list"></div>
+        </div>
+
+        <div class="side-section side-section-bottom">
+          <button class="wide-button" id="openImport">
+            <i data-lucide="download"></i><span>Import</span>
+          </button>
+        </div>
+      </aside>
+
+      <div class="resize-handle" id="sidebarResize" data-resize="sidebar" aria-label="Resize library"></div>
+
+      <main class="workspace">
+        <header class="library-toolbar" aria-label="Library filters">
+          <div class="library-filter-actions">
+            <button class="library-filter-button" id="colorFilterToggle" title="Filter by color">
+              <i data-lucide="palette"></i><span>Color</span>
+            </button>
+            <button class="library-filter-button" id="ratingFilterToggle" title="Filter by rating">
+              <i data-lucide="star"></i><span>Rating</span>
+            </button>
+          </div>
+          <label class="rating-sort" title="Sort by rating">
+            <i data-lucide="arrow-up-down"></i>
+            <select id="ratingSort">
+              <option value="">Sort rating</option>
+              <option value="high">Highest first</option>
+              <option value="low">Lowest first</option>
+            </select>
+          </label>
+        </header>
+
+        <header class="focus-toolbar" id="focusToolbar" aria-label="Image inspection">
+          <div class="focus-nav">
+            <button class="icon-button" id="exitFocus" title="Back to library"><i data-lucide="arrow-left"></i></button>
+            <span class="focus-count" id="focusCount">0 / 0</span>
+          </div>
+          <label class="focus-zoom">
+            <i data-lucide="minus"></i>
+            <input id="focusZoomInput" type="range" min="20" max="300" value="100" />
+            <i data-lucide="plus"></i>
+            <output id="focusZoomValue">100%</output>
+          </label>
+          <div class="focus-nav focus-stepper">
+            <label class="focus-decision">
+              <i data-lucide="check-check"></i>
+              <select id="focusDecision" aria-label="Review decision">
+                <option value="unreviewed">Decide</option>
+                <option value="keep">Keep</option>
+                <option value="reject">Reject</option>
+              </select>
+            </label>
+            <button class="icon-button" id="focusPrevious" title="Previous image"><i data-lucide="chevron-left"></i></button>
+            <button class="icon-button" id="focusNext" title="Next image"><i data-lucide="chevron-right"></i></button>
+          </div>
+        </header>
+
+        <div class="filter-popover color-popover" id="colorPopover" hidden>
+          <div class="filter-popover-head"><span>Filter by color</span><button class="icon-button compact-icon" data-close-filter title="Close"><i data-lucide="x"></i></button></div>
+          <div class="color-filter-bar" id="colorFilterBar" aria-label="Filter by palette color"></div>
+        </div>
+        <div class="filter-popover rating-popover" id="ratingPopover" hidden>
+          <div class="filter-popover-head"><span>Rating</span><button class="icon-button compact-icon" data-close-filter title="Close"><i data-lucide="x"></i></button></div>
+          <label class="filter-field"><span>Show</span><select id="ratingFilter" class="popover-select">
+            <option value="">All ratings</option>
+            <option value="0">Unrated</option>
+            <option value="1">1 star</option>
+            <option value="2">2 stars</option>
+            <option value="3">3 stars</option>
+            <option value="4">4 stars</option>
+            <option value="5">5 stars</option>
+          </select></label>
+        </div>
+
+        <div class="job-strip" id="jobStrip"></div>
+        <section class="grid-view active" id="gridView" aria-label="Grid"></section>
+        <section class="focus-view" id="focusView" aria-label="Image inspection"></section>
+
+        <section class="review-view" id="reviewView" aria-label="Review selection">
+          <div class="review-top">
+            <div>
+              <div class="review-title">Review</div>
+              <div class="review-meta" id="reviewMeta">Click images to mark them for rejection.</div>
+            </div>
+            <div class="review-actions">
+              <button class="secondary-button" id="cancelCull" title="Return to library">Cancel</button>
+              <button class="decision-button reject" id="confirmReject" title="Reject selected images" disabled>
+                <i data-lucide="x"></i><span id="confirmRejectLabel">Confirm reject</span>
+              </button>
+            </div>
+          </div>
+          <div class="cull-grid" id="cullGrid"></div>
+        </section>
+      </main>
+
+      <div class="resize-handle" id="inspectorResize" data-resize="inspector" aria-label="Resize inspector"></div>
+
+      <aside class="inspector" id="inspector" aria-label="Details"></aside>
+    </div>
+
+    <dialog class="import-dialog" id="importDialog">
+      <form method="dialog" class="dialog-panel">
+        <div class="dialog-head">
+          <h2>Import</h2>
+          <button class="icon-button" value="cancel" title="Close">
+            <i data-lucide="x"></i>
+          </button>
+        </div>
+
+        <label class="field">
+          <span>Instagram Link</span>
+          <input
+            id="importHandle"
+            type="text"
+            value="https://www.instagram.com/elizavetaporodina/"
+            autocomplete="off"
+          />
+        </label>
+
+        <div class="field-grid">
+          <label class="field">
+            <span>Browser</span>
+            <select id="importBrowser">
+              <option value="chrome">Chrome</option>
+              <option value="safari">Safari</option>
+              <option value="firefox">Firefox</option>
+              <option value="brave">Brave</option>
+              <option value="edge">Edge</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>Pages</span>
+            <input id="importPages" type="number" min="1" placeholder="All" />
+          </label>
+        </div>
+
+        <label class="field">
+          <span>Cookie DB</span>
+          <input id="cookieFile" type="text" autocomplete="off" />
+        </label>
+
+        <label class="field">
+          <span>Archive Path</span>
+          <input id="folderPath" type="text" value="downloads/elizavetaporodina/originals" autocomplete="off" />
+        </label>
+
+        <div class="dialog-actions">
+          <button type="button" class="secondary-button" id="scanFolder">
+            <i data-lucide="folder-search"></i><span>Scan Folder</span>
+          </button>
+          <button type="button" class="primary-button" id="startImport">
+            <i data-lucide="instagram"></i><span>Import IG</span>
+          </button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog class="import-dialog" id="shootDialog">
+      <form method="dialog" class="dialog-panel compact-dialog">
+        <div class="dialog-head">
+          <h2>New Shoot</h2>
+          <button class="icon-button" value="cancel" title="Close"><i data-lucide="x"></i></button>
+        </div>
+        <label class="field">
+          <span>Name</span>
+          <input id="shootName" type="text" value="Shoot 1" autocomplete="off" />
+        </label>
+        <div class="dialog-actions">
+          <button class="primary-button" id="createShoot" value="default"><i data-lucide="plus"></i><span>Create Shoot</span></button>
+        </div>
+      </form>
+    </dialog>
+
+    <div class="asset-menu" id="assetMenu" hidden></div>
+  </body>
+</html>

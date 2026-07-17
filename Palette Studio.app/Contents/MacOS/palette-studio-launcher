@@ -1,0 +1,19 @@
+#!/bin/zsh
+set -e
+
+APP_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+SOURCE_ROOT_FILE="$APP_ROOT/Resources/source-root"
+
+if [[ -f "$SOURCE_ROOT_FILE" ]]; then
+  ROOT="$(< "$SOURCE_ROOT_FILE")"
+else
+  ROOT="$(cd "$APP_ROOT/../.." && pwd)"
+fi
+
+if [[ ! -x "$ROOT/.venv/bin/python" || ! -f "$ROOT/palette_studio_app.py" ]]; then
+  osascript -e 'display alert "Palette Studio cannot find its editable project folder." message "Open the project and reinstall the app bundle."' || true
+  exit 1
+fi
+
+cd "$ROOT"
+exec "$ROOT/.venv/bin/python" "$ROOT/palette_studio_app.py"

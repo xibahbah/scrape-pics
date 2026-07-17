@@ -76,3 +76,36 @@ The tool saves compressed images under `downloads/<owner>_<shortcode>/compressed
 - Video/reel media is skipped by default. Add `--video-thumbnails` to import thumbnails for video items.
 - Use `--no-eagle` to only download and compress locally.
 - Use `--parent-folder-id` if you want the created Eagle folder inside an existing Eagle folder.
+
+## Palette Studio
+
+Open the desktop app by double-clicking `Palette Studio.app`, or run:
+
+```bash
+.venv/bin/python palette_studio_app.py
+```
+
+From Terminal you can also launch the app bundle:
+
+```bash
+open "Palette Studio.app"
+```
+
+Palette Studio is a local desktop app. Its interface assets, originals, thumbnails, palettes, tone analysis, skin/background suggestions, notes, swipe decisions, and shoot organization stay in this project on your laptop. The only online step is downloading a profile when you paste an Instagram link; it uses your logged-in browser cookies to do that.
+
+Paste an Instagram profile link in the top import bar and click the download button. Palette Studio downloads the profile photos, indexes them, extracts salience-aware five-color palettes, and drops them into the swipe review queue.
+
+Use the arrangement menu to group the library by person then color, or across the whole library by color. The color rail is optional and lets you narrow a grouped view to a single visual color.
+
+Each shoot has five exclusive collections: Color, Lighting, Art Design, Pose, and Reference. Select the target shoot in an image's inspector, then click one collection. The image can be in one collection per shoot, while still appearing in a different collection in another shoot. Create and switch the current shoot from the left sidebar.
+
+Index or refresh an existing Instagram archive:
+
+```bash
+.venv/bin/python studio_server.py \
+  --ingest-folder "downloads/elizavetaporodina/originals" \
+  --handle elizavetaporodina \
+  --no-serve
+```
+
+The app stores thumbnails, salience-aware palettes, highlight/midtone/shadow colors, skin/background suggestions, notes, shoot assignments, and keep/reject state in `app_data/`. Original files stay where they are unless you import a fresh handle from inside the app.
