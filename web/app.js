@@ -24,7 +24,10 @@ const state = {
   ratingSort: "",
   panelDrag: null,
   cullSelections: new Set(),
+  cullItemCount: 0,
   libraryName: "Palette Studio",
+  handleAliases: {},
+  contextHandle: "",
 };
 
 const $ = (selector, root = document) => root.querySelector(selector);
@@ -161,7 +164,7 @@ function renderSidebar() {
     handles
       .map(
         ([handle, count]) => `<button class="handle-button ${state.handle === handle ? "active" : ""}" data-handle="${escapeHtml(handle)}">
-          <i data-lucide="folder"></i><span>${escapeHtml(handle)}</span><strong>${count}</strong>
+          <i data-lucide="folder"></i><span title="${escapeHtml(handle)}">${escapeHtml(handleLabel(handle))}</span><strong>${count}</strong>
         </button>`,
       )
       .join("");
@@ -174,6 +177,10 @@ function renderSidebar() {
       </button>`,
     )
     .join("");
+}
+
+function handleLabel(handle) {
+  return state.handleAliases[handle] || handle;
 }
 
 function renderMode() {
@@ -203,22 +210,6 @@ function toneBands(toneColors = {}) {
       ([label, colors]) => `<div class="tone-row">
         <span class="tone-label">${escapeHtml(label)}</span>
         ${swatches(colors)}
-      </div>`,
-    )
-    .join("")}</div>`;
-}
-
-function contextBands(contextColors = {}) {
-  const rows = [
-    ["Skin suggestion", contextColors.skin || []],
-    ["Background", contextColors.background || []],
-  ];
-  if (!rows.some(([, colors]) => colors.length)) return "";
-  return `<div class="context-palette">${rows
-    .map(
-      ([label, colors]) => `<div class="context-row">
-        <span class="tone-label">${escapeHtml(label)}</span>
-        ${colors.length ? swatches(colors) : `<span class="tone-label">No suggestion</span>`}
       </div>`,
     )
     .join("")}</div>`;
@@ -262,8 +253,9 @@ function colorGroup(hex = "") {
 
 function filteredItems(items = state.items) {
   const filtered = items.filter((item) => {
+    if (item.status === "reject") return false;
     const ratingMatches = !state.ratingFilter || String(item.rating || 0) === state.ratingFilter;
-    const colorMatches = !state.colorFilter || (item.colors || []).some((color) => colorGroup(color) === state.colorFilter);
+    const colorMatches = !state.colorFilter || colorGroup(item.dominant_color || item.colors?.[0]) === state.colorFilter;
     return ratingMatches && colorMatches;
   });
   if (state.ratingSort === "high") return [...filtered].sort((a, b) => (b.rating || 0) - (a.rating || 0));
@@ -410,7 +402,6 @@ function renderInspector() {
     </div>
     ${swatches(item.colors)}
     ${toneBands(item.tone_colors)}
-    ${contextBands(item.context_colors)}
     <input class="name-input" id="titleInput" value="${escapeHtml(item.title || "")}" />
     <textarea class="notes-input" id="notesInput" placeholder="Notes...">${escapeHtml(item.notes || "")}</textarea>
     <input class="url-input" value="${escapeHtml(item.source_url || "")}" readonly />
@@ -459,13 +450,20 @@ function renderReview() {
     return;
   }
   const items = cullItems();
+  state.cullItemCount = items.length;
   const validIds = new Set(items.map((item) => item.id));
   state.cullSelections = new Set([...state.cullSelections].filter((id) => validIds.has(id)));
+  updateCullControls();
+  $("#cullGrid").innerHTML = items.length ? items.map(cullCard).join("") : `<div class="empty-state">No images available</div>`;
+}
+
+function updateCullControls() {
   const count = state.cullSelections.size;
-  $("#reviewMeta").textContent = count ? `${count} selected for rejection` : `${items.length} images. Click any image to mark it for rejection.`;
+  $("#reviewMeta").textContent = count
+    ? `${count} selected for rejection`
+    : `${state.cullItemCount} images. Click any image to mark it for rejection.`;
   $("#confirmReject").disabled = count === 0;
   $("#confirmRejectLabel").textContent = count ? `Confirm reject (${count})` : "Confirm reject";
-  $("#cullGrid").innerHTML = items.length ? items.map(cullCard).join("") : `<div class="empty-state">No images available</div>`;
 }
 
 function focusItems() {
@@ -664,7 +662,9 @@ async function createShoot() {
   state.currentShootId = data.current_shoot_id || data.shoot?.id || "";
   state.shootTargetId = state.currentShootId;
   $("#shootDialog").close();
-  render();
+  renderSidebar();
+  renderInspector();
+  iconRefresh();
 }
 
 async function assignSelectedToShoot(collection) {
@@ -686,7 +686,11 @@ async function assignItemToShoot(itemId, collection, shootId = state.currentShoo
   const index = state.items.findIndex((asset) => asset.id === itemId);
   if (index >= 0) state.items[index] = data.item;
   hideAssetMenu();
-  render();
+  renderSidebar();
+  if (state.shootViewId) renderGrid();
+  renderInspector();
+  renderReview();
+  iconRefresh();
 }
 
 async function removeItemFromShoot(itemId, shootId = state.shootViewId, shouldRender = true) {
@@ -707,9 +711,12 @@ async function setStatus(status) {
   const updated = await patchSelected({ status });
   if (status === "reject" && item && state.shootViewId) {
     await removeItemFromShoot(item.id, state.shootViewId, false);
-    if (state.focusId === item.id) state.focusId = "";
   }
-  if (updated && !itemMatchesCurrentFilter(updated)) {
+  if (status === "reject" && updated) {
+    state.items = state.items.filter((item) => item.id !== updated.id);
+    state.selectedId = state.items[0]?.id || null;
+    if (state.focusId === updated.id) state.focusId = "";
+  } else if (updated && !itemMatchesCurrentFilter(updated)) {
     state.items = state.items.filter((item) => item.id !== updated.id);
     state.selectedId = state.items[0]?.id || null;
   }
@@ -735,6 +742,9 @@ async function confirmCullReject() {
       await patchItem(id, { status: "reject" });
       if (state.shootViewId) await removeItemFromShoot(id, state.shootViewId, false);
     }
+    state.items = state.items.filter((item) => !state.cullSelections.has(item.id));
+    state.selectedId = state.items[0]?.id || null;
+    if (state.focusId && state.cullSelections.has(state.focusId)) state.focusId = "";
     state.cullSelections.clear();
     render();
   } catch (error) {
@@ -783,6 +793,26 @@ function hideAssetMenu() {
   state.contextItemId = "";
 }
 
+function hideHandleMenu() {
+  const menu = $("#handleMenu");
+  menu.hidden = true;
+  menu.innerHTML = "";
+  state.contextHandle = "";
+}
+
+function showHandleMenu(handle, x, y) {
+  if (!handle) return;
+  state.contextHandle = handle;
+  const menu = $("#handleMenu");
+  menu.innerHTML = `<button class="asset-menu-action" data-rename-handle><i data-lucide="pencil"></i><span>Rename</span></button>`;
+  menu.hidden = false;
+  const maxX = Math.max(10, window.innerWidth - menu.offsetWidth - 10);
+  const maxY = Math.max(10, window.innerHeight - menu.offsetHeight - 10);
+  menu.style.left = `${Math.min(x, maxX)}px`;
+  menu.style.top = `${Math.min(y, maxY)}px`;
+  iconRefresh();
+}
+
 function showAssetMenu(id, x, y) {
   const item = state.items.find((asset) => asset.id === id);
   if (!item) return;
@@ -811,7 +841,6 @@ function showAssetMenu(id, x, y) {
   const maxY = Math.max(10, window.innerHeight - menu.offsetHeight - 10);
   menu.style.left = `${Math.min(x, maxX)}px`;
   menu.style.top = `${Math.min(y, maxY)}px`;
-  renderGrid();
   renderInspector();
   iconRefresh();
 }
@@ -891,6 +920,13 @@ function bindEvents() {
     loadLibrary({ keepSelection: false }).catch(console.error);
   });
 
+  $("#handleList").addEventListener("contextmenu", (event) => {
+    const button = event.target.closest("[data-handle]");
+    if (!button?.dataset.handle) return;
+    event.preventDefault();
+    showHandleMenu(button.dataset.handle, event.clientX, event.clientY);
+  });
+
   $("#shootList").addEventListener("click", (event) => {
     const button = event.target.closest("[data-shoot]");
     if (button) setCurrentShoot(button.dataset.shoot, true).catch((error) => alert(error.message));
@@ -907,6 +943,7 @@ function bindEvents() {
     const menuButton = event.target.closest("[data-asset-menu]");
     if (menuButton) {
       event.preventDefault();
+      event.stopPropagation();
       const rect = menuButton.getBoundingClientRect();
       showAssetMenu(menuButton.dataset.assetMenu, rect.right, rect.bottom);
       return;
@@ -967,8 +1004,10 @@ function bindEvents() {
     const id = card.dataset.cullId;
     if (state.cullSelections.has(id)) state.cullSelections.delete(id);
     else state.cullSelections.add(id);
-    renderReview();
-    iconRefresh();
+    const selected = state.cullSelections.has(id);
+    card.classList.toggle("selected", selected);
+    card.setAttribute("aria-pressed", String(selected));
+    updateCullControls();
   });
   $("#cancelCull").addEventListener("click", () => {
     state.cullSelections.clear();
@@ -983,7 +1022,16 @@ function bindEvents() {
       const item = selectedItem();
       const requestedRating = Number(ratingButton.dataset.rating);
       const rating = requestedRating && requestedRating === (item?.rating || 0) ? 0 : requestedRating;
-      patchSelected({ rating }).then(render).catch(console.error);
+      patchSelected({ rating })
+        .then(() => {
+          renderInspector();
+          if (state.ratingFilter || state.ratingSort) {
+            renderGrid();
+            renderReview();
+          }
+          iconRefresh();
+        })
+        .catch(console.error);
     }
     const shootButton = event.target.closest("[data-shoot-collection]");
     if (shootButton) assignSelectedToShoot(shootButton.dataset.shootCollection).catch((error) => alert(error.message));
@@ -1013,6 +1061,20 @@ function bindEvents() {
   });
 
   $("#assetMenu").addEventListener("contextmenu", (event) => event.preventDefault());
+  $("#handleMenu").addEventListener("click", (event) => {
+    event.stopPropagation();
+    if (!event.target.closest("[data-rename-handle]") || !state.contextHandle) return;
+    const original = state.contextHandle;
+    const name = window.prompt("Rename handle", handleLabel(original));
+    if (name === null) return;
+    const alias = name.trim();
+    if (alias) state.handleAliases[original] = alias;
+    else delete state.handleAliases[original];
+    localStorage.setItem("palette-studio.handle-aliases", JSON.stringify(state.handleAliases));
+    hideHandleMenu();
+    renderSidebar();
+  });
+  $("#handleMenu").addEventListener("contextmenu", (event) => event.preventDefault());
   $("#exitFocus").addEventListener("click", closeImageFocus);
   $("#focusPrevious").addEventListener("click", () => stepFocus(-1));
   $("#focusNext").addEventListener("click", () => stepFocus(1));
@@ -1027,6 +1089,7 @@ function bindEvents() {
   window.addEventListener("resize", applyFocusZoom);
   window.addEventListener("click", (event) => {
     if (!event.target.closest("#assetMenu")) hideAssetMenu();
+    if (!event.target.closest("#handleMenu")) hideHandleMenu();
     if (!event.target.closest(".filter-popover") && !event.target.closest(".library-filter-actions")) closeFilterPopovers();
   });
 
@@ -1121,6 +1184,11 @@ function endDrag() {
 
 async function init() {
   state.libraryName = localStorage.getItem("palette-studio.library-name") || "Palette Studio";
+  try {
+    state.handleAliases = JSON.parse(localStorage.getItem("palette-studio.handle-aliases") || "{}");
+  } catch {
+    state.handleAliases = {};
+  }
   document.title = state.libraryName;
   ["--sidebar-width", "--inspector-width"].forEach((variable) => {
     const width = localStorage.getItem(panelStorageKeys[variable]);

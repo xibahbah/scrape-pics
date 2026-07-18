@@ -171,6 +171,24 @@ def extract_palette(image: Image.Image, colors: int = 5) -> List[str]:
     return [hex_color(rgb) for rgb in selected[:colors]]
 
 
+def extract_dominant_color(image: Image.Image) -> str:
+    """Return the quantized color that covers the largest pixel area."""
+    sample = image.copy()
+    sample.thumbnail((96, 96))
+    buckets: Dict[Tuple[int, int, int], Dict[str, float]] = {}
+    for r, g, b in sample.getdata():
+        key = (r // 16, g // 16, b // 16)
+        bucket = buckets.setdefault(key, {"count": 0.0, "r": 0.0, "g": 0.0, "b": 0.0})
+        bucket["count"] += 1
+        bucket["r"] += r
+        bucket["g"] += g
+        bucket["b"] += b
+    if not buckets:
+        return ""
+    bucket = max(buckets.values(), key=lambda entry: entry["count"])
+    return hex_color((bucket["r"] / bucket["count"], bucket["g"] / bucket["count"], bucket["b"] / bucket["count"]))
+
+
 def extract_tone_colors(image: Image.Image, colors: int = 3) -> Dict[str, List[str]]:
     sample = image.copy()
     sample.thumbnail((220, 220))
@@ -368,6 +386,7 @@ def analyze_file(path: Path, item_id: str) -> Dict[str, Any]:
         image = image_to_rgb(opened_thumb)
         image.thumbnail((280, 280))
         colors = extract_palette(image)
+        dominant_color = extract_dominant_color(image)
         tone_colors = extract_tone_colors(image)
         context_colors = extract_context_colors(image)
 
@@ -378,6 +397,7 @@ def analyze_file(path: Path, item_id: str) -> Dict[str, Any]:
         "bytes": stat.st_size,
         "type": path.suffix.lstrip(".").upper() or "IMAGE",
         "colors": colors,
+        "dominant_color": dominant_color,
         "tone_colors": tone_colors,
         "context_colors": context_colors,
         "thumb_path": str(thumb_path),
@@ -586,6 +606,8 @@ class LibraryStore:
         query = query.lower().strip()
         results: List[Dict[str, Any]] = []
         for item in items:
+            if filter_name == "all" and item.get("status") == "reject":
+                continue
             if filter_name != "all":
                 if filter_name == "reviewed" and item.get("status") == "unreviewed":
                     continue
@@ -611,12 +633,15 @@ class LibraryStore:
     def stats(self) -> Dict[str, Any]:
         with self.lock:
             items = list(self.data["items"].values())
-        counts = {"all": len(items), "unreviewed": 0, "keep": 0, "reject": 0, "trash": 0, "reviewed": 0}
+        visible_items = [item for item in items if item.get("status") != "reject"]
+        counts = {"all": len(visible_items), "unreviewed": 0, "keep": 0, "reject": 0, "trash": 0, "reviewed": 0}
         handles: Dict[str, int] = {}
         tags: Dict[str, int] = {}
         for item in items:
             status = item.get("status", "unreviewed")
             counts[status] = counts.get(status, 0) + 1
+            if status == "reject":
+                continue
             if status != "unreviewed":
                 counts["reviewed"] += 1
             handle = item.get("handle")
@@ -694,7 +719,7 @@ def ingest_image(path: Path, handle: str, save: bool = True) -> Tuple[Dict[str, 
     metadata = archive_metadata(path, handle)
     item_id = item_id_for(metadata["source_key"])
     existing = STORE.get(item_id)
-    if existing and existing.get("tone_colors") and existing.get("context_colors"):
+    if existing and existing.get("tone_colors") and existing.get("context_colors") and existing.get("dominant_color"):
         return existing, False
     analysis = analyze_file(path, item_id)
     item = {
@@ -744,6 +769,34 @@ def ingest_folder(path: Path, handle: str, job: Optional[Dict[str, Any]] = None)
             STORE.save()
     STORE.save()
     return {"created": created, "updated": updated, "skipped": skipped, "total": len(files)}
+
+
+def backfill_dominant_colors() -> Dict[str, int]:
+    with STORE.lock:
+        items = [dict(item) for item in STORE.data["items"].values() if not item.get("dominant_color")]
+
+    updated = skipped = 0
+    for index, item in enumerate(items, start=1):
+        image_path = Path(str(item.get("thumb_path") or item.get("path") or ""))
+        try:
+            with Image.open(image_path) as opened:
+                dominant_color = extract_dominant_color(image_to_rgb(opened))
+            if not dominant_color:
+                skipped += 1
+                continue
+            with STORE.lock:
+                stored = STORE.data["items"].get(item["id"])
+                if stored:
+                    stored["dominant_color"] = dominant_color
+                    stored["updated_at"] = utc_now()
+                    updated += 1
+        except Exception:
+            skipped += 1
+        if index % 25 == 0:
+            STORE.save()
+    if items:
+        STORE.save()
+    return {"updated": updated, "skipped": skipped, "total": len(items)}
 
 
 def guess_chrome_cookiefile() -> Optional[str]:
@@ -1092,6 +1145,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--port", type=int, default=8787)
     parser.add_argument("--ingest-folder", type=Path, help="Index an existing image folder before serving.")
     parser.add_argument("--handle", help="Instagram handle to assign when indexing a folder.")
+    parser.add_argument("--backfill-dominant-colors", action="store_true", help="Calculate dominant colors for existing assets.")
     parser.add_argument("--no-serve", action="store_true", help="Run the ingest command and exit.")
     return parser.parse_args(argv)
 
@@ -1107,6 +1161,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 **result
             )
         )
+    if args.backfill_dominant_colors:
+        result = backfill_dominant_colors()
+        print("Calculated dominant colors for {updated}/{total} assets; {skipped} skipped.".format(**result))
     if args.no_serve:
         return 0
     serve(args.host, args.port)

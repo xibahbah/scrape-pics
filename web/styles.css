@@ -1689,6 +1689,10 @@ button {
   display: none;
 }
 
+.handle-menu {
+  width: 156px;
+}
+
 .asset-menu-title {
   margin: 2px 2px 8px;
   color: var(--muted);
