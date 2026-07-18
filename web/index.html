@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Palette Studio</title>
+    <title>Jade</title>
     <link rel="stylesheet" href="/styles.css" />
     <script defer src="/lucide.min.js"></script>
     <script defer src="/app.js"></script>
@@ -11,17 +11,9 @@
   <body>
     <div class="shell">
       <aside class="sidebar" aria-label="Library">
-        <div class="brand-row">
-          <div class="brand-mark" id="libraryMark">PS</div>
-          <div>
-            <button class="brand-name" id="libraryName" title="Rename library">Palette Studio</button>
-            <div class="brand-subtitle" id="librarySubtitle">0 assets</div>
-          </div>
-        </div>
-
         <nav class="nav-block" id="statusNav">
           <button class="nav-item active" data-filter="all">
-            <i data-lucide="images"></i><span>All</span><strong data-count="all">0</strong>
+            <i data-lucide="images"></i><span>All pictures</span><strong data-count="all">0</strong>
           </button>
           <button class="nav-item" id="cullMode">
             <i data-lucide="list-checks"></i><span>Review</span>
@@ -29,19 +21,24 @@
         </nav>
 
         <div class="side-section">
-          <div class="side-label">Handles</div>
+          <div class="side-label">Photographers</div>
           <div id="handleList" class="handle-list"></div>
         </div>
 
         <div class="side-section shoots-section">
-          <div class="side-label side-label-row"><span>Shoots</span><button class="icon-button compact-icon" id="newShoot" title="New shoot"><i data-lucide="plus"></i></button></div>
+          <div class="side-label side-label-row"><span>Boards</span><button class="icon-button compact-icon" id="newShoot" title="New board"><i data-lucide="plus"></i></button></div>
           <div id="shootList" class="shoot-list"></div>
         </div>
 
         <div class="side-section side-section-bottom">
-          <button class="wide-button" id="openImport">
-            <i data-lucide="download"></i><span>Import</span>
-          </button>
+          <div class="import-actions">
+            <button class="wide-button" id="openImport">
+              <i data-lucide="download"></i><span>Import</span>
+            </button>
+            <button class="icon-button import-history-button" id="openImportHistory" title="Import history" aria-label="Import history">
+              <i data-lucide="history"></i>
+            </button>
+          </div>
         </div>
       </aside>
 
@@ -57,14 +54,19 @@
               <i data-lucide="star"></i><span>Rating</span>
             </button>
           </div>
-          <label class="rating-sort" title="Sort by rating">
-            <i data-lucide="arrow-up-down"></i>
-            <select id="ratingSort">
-              <option value="">Sort rating</option>
-              <option value="high">Highest first</option>
-              <option value="low">Lowest first</option>
-            </select>
-          </label>
+          <div class="library-toolbar-actions">
+            <button class="library-filter-button randomize-button" id="randomizeLibrary" title="Shuffle this collection">
+              <i data-lucide="shuffle"></i><span>Randomize</span>
+            </button>
+            <label class="rating-sort" title="Sort by rating">
+              <i data-lucide="arrow-up-down"></i>
+              <select id="ratingSort">
+                <option value="">Sort rating</option>
+                <option value="high">Highest first</option>
+                <option value="low">Lowest first</option>
+              </select>
+            </label>
+          </div>
         </header>
 
         <header class="focus-toolbar" id="focusToolbar" aria-label="Image inspection">
@@ -138,14 +140,14 @@
     <dialog class="import-dialog" id="importDialog">
       <form method="dialog" class="dialog-panel">
         <div class="dialog-head">
-          <h2>Import</h2>
+          <h2>Import Instagram</h2>
           <button class="icon-button" value="cancel" title="Close">
             <i data-lucide="x"></i>
           </button>
         </div>
 
         <label class="field">
-          <span>Instagram Link</span>
+          <span>Instagram profile link</span>
           <input
             id="importHandle"
             type="text"
@@ -176,17 +178,20 @@
           <input id="cookieFile" type="text" autocomplete="off" />
         </label>
 
-        <label class="field">
-          <span>Archive Path</span>
-          <input id="folderPath" type="text" value="downloads/elizavetaporodina/originals" autocomplete="off" />
-        </label>
-
         <div class="dialog-actions">
-          <button type="button" class="secondary-button" id="scanFolder">
-            <i data-lucide="folder-search"></i><span>Scan Folder</span>
-          </button>
           <button type="button" class="primary-button" id="startImport">
-            <i data-lucide="instagram"></i><span>Import IG</span>
+            <i data-lucide="instagram"></i><span>Import Instagram</span>
+          </button>
+        </div>
+
+        <div class="import-local-divider"><span>or</span></div>
+        <label class="field">
+          <span>Local image folder</span>
+          <input id="folderPath" type="text" placeholder="/Users/you/Pictures/reference" autocomplete="off" />
+        </label>
+        <div class="dialog-actions import-local-action">
+          <button type="button" class="secondary-button" id="scanFolder">
+            <i data-lucide="folder-search"></i><span>Add local folder</span>
           </button>
         </div>
       </form>
@@ -195,20 +200,110 @@
     <dialog class="import-dialog" id="shootDialog">
       <form method="dialog" class="dialog-panel compact-dialog">
         <div class="dialog-head">
-          <h2>New Shoot</h2>
+          <h2>New Board</h2>
           <button class="icon-button" value="cancel" title="Close"><i data-lucide="x"></i></button>
         </div>
         <label class="field">
           <span>Name</span>
-          <input id="shootName" type="text" value="Shoot 1" autocomplete="off" />
+          <input id="shootName" type="text" value="Board 1" autocomplete="off" />
         </label>
         <div class="dialog-actions">
-          <button class="primary-button" id="createShoot" value="default"><i data-lucide="plus"></i><span>Create Shoot</span></button>
+          <button class="primary-button" id="createShoot" value="default"><i data-lucide="plus"></i><span>Create Board</span></button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog class="import-dialog" id="renameHandleDialog">
+      <form class="dialog-panel compact-dialog" id="renameHandleForm">
+        <div class="dialog-head">
+          <h2>Rename Photographer</h2>
+          <button class="icon-button" type="button" id="cancelRenameHandle" title="Close"><i data-lucide="x"></i></button>
+        </div>
+        <label class="field">
+          <span>Name</span>
+          <input id="renameHandleInput" type="text" autocomplete="off" />
+        </label>
+        <div class="dialog-actions">
+          <button class="secondary-button" type="button" id="cancelRenameHandleSecondary">Cancel</button>
+          <button class="primary-button" type="submit"><i data-lucide="check"></i><span>Rename</span></button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog class="import-dialog" id="deleteHandleDialog">
+      <form class="dialog-panel compact-dialog" id="deleteHandleForm">
+        <div class="dialog-head">
+          <h2>Delete Photographer</h2>
+          <button class="icon-button" type="button" id="cancelDeleteHandle" title="Close"><i data-lucide="x"></i></button>
+        </div>
+        <p class="dialog-copy" id="deleteHandleCopy"></p>
+        <div class="dialog-actions">
+          <button class="secondary-button" type="button" id="cancelDeleteHandleSecondary">Cancel</button>
+          <button class="danger-button" type="submit"><i data-lucide="trash-2"></i><span>Delete locally</span></button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog class="import-dialog" id="renameShootDialog">
+      <form class="dialog-panel compact-dialog" id="renameShootForm">
+        <div class="dialog-head">
+          <h2>Rename Board</h2>
+          <button class="icon-button" type="button" id="cancelRenameShoot" title="Close"><i data-lucide="x"></i></button>
+        </div>
+        <label class="field">
+          <span>Name</span>
+          <input id="renameShootInput" type="text" autocomplete="off" />
+        </label>
+        <div class="dialog-actions">
+          <button class="secondary-button" type="button" id="cancelRenameShootSecondary">Cancel</button>
+          <button class="primary-button" type="submit"><i data-lucide="check"></i><span>Rename</span></button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog class="import-dialog" id="deleteShootDialog">
+      <form class="dialog-panel compact-dialog" id="deleteShootForm">
+        <div class="dialog-head">
+          <h2>Delete Board</h2>
+          <button class="icon-button" type="button" id="cancelDeleteShoot" title="Close"><i data-lucide="x"></i></button>
+        </div>
+        <p class="dialog-copy" id="deleteShootCopy"></p>
+        <div class="dialog-actions">
+          <button class="secondary-button" type="button" id="cancelDeleteShootSecondary">Cancel</button>
+          <button class="danger-button" type="submit"><i data-lucide="trash-2"></i><span>Delete board</span></button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog class="import-dialog" id="importHistoryDialog">
+      <form method="dialog" class="dialog-panel import-history-dialog">
+        <div class="dialog-head">
+          <h2>Import History</h2>
+          <button class="icon-button" value="cancel" title="Close"><i data-lucide="x"></i></button>
+        </div>
+        <div class="import-history-list" id="importHistoryList"></div>
+        <div class="dialog-actions">
+          <button class="danger-button" type="button" id="deleteImportBatch" disabled><i data-lucide="trash-2"></i><span>Delete selected</span></button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog class="import-dialog" id="deleteImportDialog">
+      <form class="dialog-panel compact-dialog" id="deleteImportForm">
+        <div class="dialog-head">
+          <h2>Delete Import</h2>
+          <button class="icon-button" type="button" id="cancelDeleteImport" title="Close"><i data-lucide="x"></i></button>
+        </div>
+        <p class="dialog-copy" id="deleteImportCopy"></p>
+        <div class="dialog-actions">
+          <button class="secondary-button" type="button" id="cancelDeleteImportSecondary">Cancel</button>
+          <button class="danger-button" type="submit"><i data-lucide="trash-2"></i><span>Delete locally</span></button>
         </div>
       </form>
     </dialog>
 
     <div class="asset-menu" id="assetMenu" hidden></div>
     <div class="asset-menu handle-menu" id="handleMenu" hidden></div>
+    <div class="asset-menu handle-menu" id="shootMenu" hidden></div>
   </body>
 </html>

@@ -25,9 +25,20 @@ const state = {
   panelDrag: null,
   cullSelections: new Set(),
   cullItemCount: 0,
-  libraryName: "Palette Studio",
+  libraryName: "Jade",
   handleAliases: {},
   contextHandle: "",
+  renamingHandle: "",
+  deletingHandle: "",
+  imports: [],
+  selectedImportId: "",
+  deletingImportId: "",
+  dismissedJobIds: new Set(),
+  contextShootId: "",
+  renamingShootId: "",
+  deletingShootId: "",
+  randomized: false,
+  randomOrder: [],
 };
 
 const $ = (selector, root = document) => root.querySelector(selector);
@@ -126,6 +137,73 @@ async function loadJobs() {
   }
 }
 
+function importLabel(record) {
+  const source = record.kind === "instagram" ? "Instagram" : "Folder scan";
+  return `${source} - ${record.handle ? `@${record.handle}` : "Library"}`;
+}
+
+function formatImportDate(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "Unknown date";
+  return date.toLocaleString([], { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" });
+}
+
+function renderImportHistory() {
+  const list = $("#importHistoryList");
+  const selected = state.imports.find((record) => record.id === state.selectedImportId);
+  $("#deleteImportBatch").hidden = !selected;
+  $("#deleteImportBatch").disabled = !selected;
+  if (!state.imports.length) {
+    list.innerHTML = `<div class="history-empty">No imports yet</div>`;
+    return;
+  }
+  list.innerHTML = state.imports
+    .map((record) => {
+      const active = record.id === state.selectedImportId;
+      const stateLabel = record.state === "error" ? "Import failed" : record.state === "running" ? "Importing" : `${record.asset_count || 0} added`;
+      return `<button class="import-history-row ${active ? "selected" : ""}" type="button" data-import-history="${escapeHtml(record.id)}" aria-pressed="${active}">
+        <span class="import-history-icon"><i data-lucide="${record.kind === "instagram" ? "instagram" : "folder-search"}"></i></span>
+        <span class="import-history-main"><strong>${escapeHtml(importLabel(record))}</strong><small>${escapeHtml(formatImportDate(record.created_at))} - ${escapeHtml(stateLabel)}</small></span>
+        <span class="import-history-count">${record.asset_count || 0}</span>
+      </button>`;
+    })
+    .join("");
+  iconRefresh();
+}
+
+async function openImportHistory() {
+  const data = await api("/api/imports");
+  state.imports = data.imports || [];
+  if (!state.imports.some((record) => record.id === state.selectedImportId)) state.selectedImportId = "";
+  renderImportHistory();
+  $("#importHistoryDialog").showModal();
+}
+
+function openDeleteImportDialog() {
+  const record = state.imports.find((entry) => entry.id === state.selectedImportId);
+  if (!record) return;
+  state.deletingImportId = record.id;
+  $("#deleteImportCopy").textContent = `Delete ${record.asset_count || 0} image${record.asset_count === 1 ? "" : "s"} added by ${importLabel(record)}? This permanently removes this batch's originals and thumbnails from this Mac. Other imports stay intact.`;
+  $("#deleteImportDialog").showModal();
+}
+
+async function deleteImportBatch() {
+  const importId = state.deletingImportId;
+  if (!importId) return;
+  const result = await api(`/api/imports/${encodeURIComponent(importId)}`, { method: "DELETE" });
+  $("#deleteImportDialog").close();
+  state.deletingImportId = "";
+  state.selectedImportId = "";
+  state.stats = result.stats || state.stats;
+  state.shoots = result.shoots || state.shoots;
+  state.currentShootId = result.current_shoot_id || state.currentShootId;
+  await loadLibrary({ keepSelection: false });
+  const data = await api("/api/imports");
+  state.imports = data.imports || [];
+  renderImportHistory();
+  if (result.failed_files) alert(`${result.failed_files} file${result.failed_files === 1 ? "" : "s"} could not be deleted.`);
+}
+
 function render() {
   renderSidebar();
   renderMode();
@@ -139,35 +217,23 @@ function render() {
 
 function renderSidebar() {
   const counts = state.stats.counts || {};
-  $("#libraryName").textContent = state.libraryName;
-  $("#libraryMark").textContent = state.libraryName
-    .split(/\s+/)
-    .filter(Boolean)
-    .slice(0, 2)
-    .map((word) => word[0])
-    .join("")
-    .toUpperCase() || "PS";
-  $("#librarySubtitle").textContent = `${counts.all || 0} assets`;
   $$("[data-count]").forEach((node) => {
     node.textContent = counts[node.dataset.count] || 0;
   });
   $$("#statusNav .nav-item").forEach((button) => {
-    button.classList.toggle("active", button.dataset.filter === state.filter);
+    button.classList.toggle("active", button.dataset.filter === state.filter && !state.randomized);
   });
   $("#cullMode").classList.toggle("active", state.view === "review");
 
   const handles = state.stats.handles || [];
-  $("#handleList").innerHTML =
-    `<button class="handle-button ${state.handle ? "" : "active"}" data-handle="">
-      <i data-lucide="folder"></i><span>All Handles</span><strong>${counts.all || 0}</strong>
-    </button>` +
-    handles
-      .map(
-        ([handle, count]) => `<button class="handle-button ${state.handle === handle ? "active" : ""}" data-handle="${escapeHtml(handle)}">
-          <i data-lucide="folder"></i><span title="${escapeHtml(handle)}">${escapeHtml(handleLabel(handle))}</span><strong>${count}</strong>
-        </button>`,
-      )
-      .join("");
+  $("#handleList").innerHTML = handles
+    .map(
+      ([handle, count]) => `<button class="handle-button ${state.handle === handle ? "active" : ""}" data-handle="${escapeHtml(handle)}">
+        <i data-lucide="user-round"></i><span title="${escapeHtml(handle)}">${escapeHtml(handleLabel(handle))}</span><strong>${count}</strong>
+      </button>`,
+    )
+    .join("");
+  $("#randomizeLibrary").classList.toggle("active", state.randomized);
 
   const shoots = state.shoots || [];
   $("#shootList").innerHTML = shoots
@@ -260,7 +326,26 @@ function filteredItems(items = state.items) {
   });
   if (state.ratingSort === "high") return [...filtered].sort((a, b) => (b.rating || 0) - (a.rating || 0));
   if (state.ratingSort === "low") return [...filtered].sort((a, b) => (a.rating || 0) - (b.rating || 0));
-  return filtered;
+  return state.randomized ? randomizeItems(filtered) : filtered;
+}
+
+function randomizeItems(items) {
+  const ids = items.map((item) => item.id);
+  const sameSet = state.randomOrder.length === ids.length && state.randomOrder.every((id) => ids.includes(id));
+  if (!sameSet) {
+    state.randomOrder = [...ids];
+    for (let index = state.randomOrder.length - 1; index > 0; index -= 1) {
+      const swapIndex = Math.floor(Math.random() * (index + 1));
+      [state.randomOrder[index], state.randomOrder[swapIndex]] = [state.randomOrder[swapIndex], state.randomOrder[index]];
+    }
+  }
+  const positions = new Map(state.randomOrder.map((id, index) => [id, index]));
+  return [...items].sort((left, right) => positions.get(left.id) - positions.get(right.id));
+}
+
+function clearRandomization() {
+  state.randomized = false;
+  state.randomOrder = [];
 }
 
 function renderColorFilters() {
@@ -307,6 +392,7 @@ function renderGrid() {
 }
 
 const shootCollectionMeta = [
+  ["makeup", "Makeup", "sparkles"],
   ["color", "Color", "palette"],
   ["lighting", "Lighting", "sun"],
   ["art_design", "Art Design", "paintbrush"],
@@ -316,7 +402,7 @@ const shootCollectionMeta = [
 
 function assetCard(item, inShoot = false) {
   return `<article class="asset-card ${inShoot ? "shoot-asset-card" : ""} ${item.id === state.selectedId ? "selected" : ""} ${escapeHtml(item.status)}" data-id="${escapeHtml(item.id)}">
-    <button class="asset-open" data-id="${escapeHtml(item.id)}" title="Open image">
+    <button class="asset-open" data-id="${escapeHtml(item.id)}" title="Select image. Double-click to inspect.">
     <div class="asset-thumb-wrap">
       <img class="asset-thumb" src="${escapeHtml(item.thumb_url)}" alt="${escapeHtml(item.title)}" loading="lazy" />
     </div>
@@ -352,8 +438,8 @@ function shootControls(item) {
   const assignment = (item.shoot_assignments || {})[selectedShootId] || "";
   const selectedShoot = state.shoots.find((shoot) => shoot.id === selectedShootId);
   return `<div class="detail-section">
-    <div class="detail-title">Add To Shoot</div>
-    <select class="shoot-target" id="shootTarget" aria-label="Target shoot">
+    <div class="detail-title">Add To Board</div>
+    <select class="shoot-target" id="shootTarget" aria-label="Target board">
       ${state.shoots
         .map(
           (shoot) => `<option value="${escapeHtml(shoot.id)}" ${shoot.id === selectedShootId ? "selected" : ""}>${escapeHtml(shoot.name)}${shoot.id === state.currentShootId ? " (current)" : ""}</option>`,
@@ -367,14 +453,14 @@ function shootControls(item) {
         </button>`,
       )
       .join("")}</div>
-    <div class="shoot-assignment">${assignment ? `In ${escapeHtml(selectedShoot?.name || "shoot")} - ${escapeHtml(shootCollectionMeta.find(([key]) => key === assignment)?.[1] || assignment)}` : "Choose a collection for this image."}</div>
+    <div class="shoot-assignment">${assignment ? `In ${escapeHtml(selectedShoot?.name || "board")} - ${escapeHtml(shootCollectionMeta.find(([key]) => key === assignment)?.[1] || assignment)}` : "Choose a board section for this image."}</div>
   </div>`;
 }
 
 function removeFromShootControl(item) {
   if (!state.shootViewId || !(item.shoot_assignments || {})[state.shootViewId]) return "";
-  return `<button class="remove-shoot-button" data-remove-from-shoot title="Remove from this shoot only">
-    <i data-lucide="trash-2"></i><span>Remove from Shoot</span>
+  return `<button class="remove-shoot-button" data-remove-from-shoot title="Remove from this board only">
+    <i data-lucide="trash-2"></i><span>Remove from Board</span>
   </button>`;
 }
 
@@ -421,7 +507,7 @@ function renderInspector() {
         <div class="meta-row"><dt>Dimensions</dt><dd>${item.width || 0} x ${item.height || 0}</dd></div>
         <div class="meta-row"><dt>Size</dt><dd>${formatBytes(item.bytes)}</dd></div>
         <div class="meta-row"><dt>Type</dt><dd>${escapeHtml(item.type || "")}</dd></div>
-        <div class="meta-row"><dt>Handle</dt><dd>${escapeHtml(item.handle || "")}</dd></div>
+        <div class="meta-row"><dt>Photographer</dt><dd>${escapeHtml(item.handle || "")}</dd></div>
         <div class="meta-row"><dt>Post</dt><dd>${escapeHtml(item.post_code || "")}</dd></div>
       </dl>
     </div>`;
@@ -459,11 +545,13 @@ function renderReview() {
 
 function updateCullControls() {
   const count = state.cullSelections.size;
+  const action = state.shootViewId ? "removal from this board" : "rejection";
+  const buttonAction = state.shootViewId ? "Remove" : "Reject";
   $("#reviewMeta").textContent = count
-    ? `${count} selected for rejection`
-    : `${state.cullItemCount} images. Click any image to mark it for rejection.`;
+    ? `${count} selected for ${action}`
+    : `${state.cullItemCount} images. Click any image to mark it for ${action}.`;
   $("#confirmReject").disabled = count === 0;
-  $("#confirmRejectLabel").textContent = count ? `Confirm reject (${count})` : "Confirm reject";
+  $("#confirmRejectLabel").textContent = count ? `Confirm ${buttonAction.toLowerCase()} (${count})` : `Confirm ${buttonAction.toLowerCase()}`;
 }
 
 function focusItems() {
@@ -570,21 +658,37 @@ function renderFocus() {
 }
 
 function renderJobs() {
-  const activeJobs = state.jobs.filter((job) => job.state === "running" || job.state === "error").slice(0, 2);
+  const activeJobs = state.jobs
+    .filter((job) => (job.state === "running" || job.state === "paused" || job.state === "cancelling" || job.state === "error") && !state.dismissedJobIds.has(job.id))
+    .slice(0, 2);
   const strip = $("#jobStrip");
   if (!activeJobs.length) {
     strip.classList.remove("active");
-    strip.textContent = "";
+    strip.innerHTML = "";
     return;
   }
   strip.classList.add("active");
-  strip.textContent = activeJobs
+  strip.innerHTML = activeJobs
     .map((job) => {
       const total = job.total ? `/${job.total}` : "";
       const tail = job.state === "error" ? `Error: ${job.error}` : job.message || job.kind;
-      return `${job.target}: ${job.done}${total} ${tail}`;
+      const controls = job.state === "running"
+        ? `<button class="job-control" data-job-action="pause" data-job-id="${escapeHtml(job.id)}" title="Pause import"><i data-lucide="pause"></i></button><button class="job-control danger" data-job-action="cancel" data-job-id="${escapeHtml(job.id)}" title="Cancel import"><i data-lucide="x"></i></button>`
+        : job.state === "paused"
+          ? `<button class="job-control" data-job-action="resume" data-job-id="${escapeHtml(job.id)}" title="Resume import"><i data-lucide="play"></i></button><button class="job-control danger" data-job-action="cancel" data-job-id="${escapeHtml(job.id)}" title="Cancel import"><i data-lucide="x"></i></button>`
+          : "";
+      return `<div class="job-notice"><span>${escapeHtml(`${job.target}: ${job.done}${total} ${tail}`)}</span><div class="job-actions">${controls}<button class="job-dismiss" data-dismiss-job="${escapeHtml(job.id)}" title="Dismiss"><i data-lucide="x"></i></button></div></div>`;
     })
-    .join("  |  ");
+    .join("");
+  iconRefresh();
+}
+
+async function controlImportJob(jobId, action) {
+  await api(`/api/jobs/${encodeURIComponent(jobId)}/control`, {
+    method: "POST",
+    body: JSON.stringify({ action }),
+  });
+  await loadJobs();
 }
 
 function updateCounts(previousStatus, nextStatus) {
@@ -634,6 +738,7 @@ async function setCurrentShoot(shootId, showCollections = false) {
     state.query = "";
     state.view = "grid";
     state.cullSelections.clear();
+    clearRandomization();
     render();
   }
   const data = await api(`/api/shoots/${shootId}`, {
@@ -708,10 +813,20 @@ async function removeItemFromShoot(itemId, shootId = state.shootViewId, shouldRe
 
 async function setStatus(status) {
   const item = selectedItem();
-  const updated = await patchSelected({ status });
-  if (status === "reject" && item && state.shootViewId) {
+  if (!item) return;
+
+  // A rejection from a shoot means "remove this reference from this shoot".
+  // It must never alter the asset's library status or other shoot assignments.
+  if (status === "reject" && state.shootViewId) {
     await removeItemFromShoot(item.id, state.shootViewId, false);
+    state.items = state.items.filter((asset) => asset.id !== item.id);
+    state.selectedId = state.items[0]?.id || null;
+    if (state.focusId === item.id) state.focusId = "";
+    render();
+    return;
   }
+
+  const updated = await patchSelected({ status });
   if (status === "reject" && updated) {
     state.items = state.items.filter((item) => item.id !== updated.id);
     state.selectedId = state.items[0]?.id || null;
@@ -732,15 +847,16 @@ async function rejectItem(itemId) {
 async function confirmCullReject() {
   const ids = [...state.cullSelections];
   if (!ids.length) return;
-  const confirmed = window.confirm(`Reject ${ids.length} selected image${ids.length === 1 ? "" : "s"}?`);
+  const action = state.shootViewId ? "Remove from this board" : "Reject";
+  const confirmed = window.confirm(`${action} ${ids.length} selected image${ids.length === 1 ? "" : "s"}?`);
   if (!confirmed) return;
   const button = $("#confirmReject");
   button.disabled = true;
   $("#confirmRejectLabel").textContent = "Rejecting...";
   try {
     for (const id of ids) {
-      await patchItem(id, { status: "reject" });
       if (state.shootViewId) await removeItemFromShoot(id, state.shootViewId, false);
+      else await patchItem(id, { status: "reject" });
     }
     state.items = state.items.filter((item) => !state.cullSelections.has(item.id));
     state.selectedId = state.items[0]?.id || null;
@@ -755,8 +871,9 @@ async function confirmCullReject() {
 
 function selectItem(id) {
   state.selectedId = id;
-  renderGrid();
-  renderReview();
+  $$("#gridView .asset-card").forEach((card) => {
+    card.classList.toggle("selected", card.dataset.id === id);
+  });
   renderInspector();
   iconRefresh();
 }
@@ -786,6 +903,22 @@ function stepFocus(direction) {
   render();
 }
 
+function moveGridSelection(key) {
+  const items = state.view === "review" ? cullItems() : focusItems();
+  if (!items.length) return;
+  const currentIndex = Math.max(0, items.findIndex((item) => item.id === state.selectedId));
+  const currentCard = $(".asset-card.selected");
+  const cardWidth = currentCard?.getBoundingClientRect().width || 220;
+  const columns = Math.max(1, Math.floor($("#gridView").clientWidth / Math.max(1, cardWidth + 18)));
+  const delta = key === "ArrowLeft" ? -1 : key === "ArrowRight" ? 1 : key === "ArrowUp" ? -columns : columns;
+  const next = items[Math.max(0, Math.min(items.length - 1, currentIndex + delta))];
+  if (!next) return;
+  selectItem(next.id);
+  requestAnimationFrame(() => {
+    $(".asset-card.selected")?.scrollIntoView({ block: "nearest", inline: "nearest" });
+  });
+}
+
 function hideAssetMenu() {
   const menu = $("#assetMenu");
   menu.hidden = true;
@@ -800,17 +933,144 @@ function hideHandleMenu() {
   state.contextHandle = "";
 }
 
-function showHandleMenu(handle, x, y) {
-  if (!handle) return;
-  state.contextHandle = handle;
-  const menu = $("#handleMenu");
-  menu.innerHTML = `<button class="asset-menu-action" data-rename-handle><i data-lucide="pencil"></i><span>Rename</span></button>`;
+function hideShootMenu() {
+  const menu = $("#shootMenu");
+  menu.hidden = true;
+  menu.innerHTML = "";
+  state.contextShootId = "";
+}
+
+function showShootMenu(shootId, x, y) {
+  const shoot = state.shoots.find((entry) => entry.id === shootId);
+  if (!shoot) return;
+  state.contextShootId = shootId;
+  const menu = $("#shootMenu");
+  menu.innerHTML = `<button class="asset-menu-action" data-rename-shoot><i data-lucide="pencil"></i><span>Rename board</span></button>
+    <div class="asset-menu-divider"></div>
+    <button class="asset-menu-action handle-menu-delete" data-delete-shoot><i data-lucide="trash-2"></i><span>Delete board</span></button>`;
   menu.hidden = false;
   const maxX = Math.max(10, window.innerWidth - menu.offsetWidth - 10);
   const maxY = Math.max(10, window.innerHeight - menu.offsetHeight - 10);
   menu.style.left = `${Math.min(x, maxX)}px`;
   menu.style.top = `${Math.min(y, maxY)}px`;
   iconRefresh();
+}
+
+function openRenameShootDialog(shootId) {
+  const shoot = state.shoots.find((entry) => entry.id === shootId);
+  if (!shoot) return;
+  state.renamingShootId = shootId;
+  hideShootMenu();
+  $("#renameShootInput").value = shoot.name;
+  $("#renameShootDialog").showModal();
+  $("#renameShootInput").focus();
+  $("#renameShootInput").select();
+}
+
+async function saveShootName() {
+  const shootId = state.renamingShootId;
+  const name = $("#renameShootInput").value.trim();
+  if (!shootId || !name) return;
+  const data = await api(`/api/shoots/${encodeURIComponent(shootId)}`, {
+    method: "PATCH",
+    body: JSON.stringify({ name }),
+  });
+  state.shoots = data.shoots || state.shoots;
+  state.currentShootId = data.current_shoot_id || state.currentShootId;
+  $("#renameShootDialog").close();
+  state.renamingShootId = "";
+  render();
+}
+
+function openDeleteShootDialog(shootId) {
+  const shoot = state.shoots.find((entry) => entry.id === shootId);
+  if (!shoot) return;
+  state.deletingShootId = shootId;
+  hideShootMenu();
+  $("#deleteShootCopy").textContent = `Delete ${shoot.name}? Its image assignments will be removed, but every original file stays in your library.`;
+  $("#deleteShootDialog").showModal();
+}
+
+async function deleteShoot() {
+  const shootId = state.deletingShootId;
+  if (!shootId) return;
+  const data = await api(`/api/shoots/${encodeURIComponent(shootId)}`, { method: "DELETE" });
+  $("#deleteShootDialog").close();
+  state.deletingShootId = "";
+  state.shoots = data.shoots || [];
+  state.currentShootId = data.current_shoot_id || "";
+  state.shootTargetId = state.currentShootId;
+  if (state.shootViewId === shootId) state.shootViewId = "";
+  await loadLibrary({ keepSelection: false });
+}
+
+function showHandleMenu(handle, x, y) {
+  if (!handle) return;
+  state.contextHandle = handle;
+  const menu = $("#handleMenu");
+  menu.innerHTML = `<button class="asset-menu-action" data-rename-handle><i data-lucide="pencil"></i><span>Rename photographer</span></button>
+    <div class="asset-menu-divider"></div>
+    <button class="asset-menu-action handle-menu-delete" data-delete-handle><i data-lucide="trash-2"></i><span>Delete locally</span></button>`;
+  menu.hidden = false;
+  const maxX = Math.max(10, window.innerWidth - menu.offsetWidth - 10);
+  const maxY = Math.max(10, window.innerHeight - menu.offsetHeight - 10);
+  menu.style.left = `${Math.min(x, maxX)}px`;
+  menu.style.top = `${Math.min(y, maxY)}px`;
+  iconRefresh();
+}
+
+function openRenameHandleDialog(handle) {
+  state.renamingHandle = handle;
+  hideHandleMenu();
+  $("#renameHandleInput").value = handleLabel(handle);
+  $("#renameHandleDialog").showModal();
+  $("#renameHandleInput").focus();
+  $("#renameHandleInput").select();
+}
+
+function saveHandleAlias() {
+  const handle = state.renamingHandle;
+  if (!handle) return;
+  const alias = $("#renameHandleInput").value.trim();
+  if (alias) state.handleAliases[handle] = alias;
+  else delete state.handleAliases[handle];
+  localStorage.setItem("palette-studio.handle-aliases", JSON.stringify(state.handleAliases));
+  $("#renameHandleDialog").close();
+  state.renamingHandle = "";
+  renderSidebar();
+}
+
+function openDeleteHandleDialog(handle) {
+  const count = (state.stats.handles || []).find(([name]) => name === handle)?.[1] || 0;
+  state.deletingHandle = handle;
+  hideHandleMenu();
+  $("#deleteHandleCopy").textContent = `Delete ${count} image${count === 1 ? "" : "s"} by ${handleLabel(handle)} from this Mac? This permanently removes their original files and thumbnails.`;
+  $("#deleteHandleDialog").showModal();
+}
+
+async function deleteHandle() {
+  const handle = state.deletingHandle;
+  if (!handle) return;
+  const count = (state.stats.handles || []).find(([name]) => name === handle)?.[1] || 0;
+  if (!count) {
+    $("#deleteHandleDialog").close();
+    state.deletingHandle = "";
+    return;
+  }
+  const result = await api(`/api/handles/${encodeURIComponent(handle)}`, { method: "DELETE" });
+  $("#deleteHandleDialog").close();
+  state.deletingHandle = "";
+  delete state.handleAliases[handle];
+  localStorage.setItem("palette-studio.handle-aliases", JSON.stringify(state.handleAliases));
+  if (state.handle === handle) state.handle = "";
+  state.focusId = "";
+  state.shootViewId = "";
+  state.cullSelections.clear();
+  state.stats = result.stats || state.stats;
+  state.shoots = result.shoots || state.shoots;
+  state.currentShootId = result.current_shoot_id || state.currentShootId;
+  await loadLibrary({ keepSelection: false });
+  if (result.failed_files) alert(`${result.failed_files} file${result.failed_files === 1 ? "" : "s"} could not be deleted.`);
 }
 
 function showAssetMenu(id, x, y) {
@@ -821,8 +1081,8 @@ function showAssetMenu(id, x, y) {
   const menu = $("#assetMenu");
   const currentShootId = state.currentShootId || state.shoots[0]?.id || "";
   const shootOptions = state.shoots.length
-    ? `<div class="asset-menu-title">Add to shoot</div>
-      <select class="asset-menu-target" id="assetMenuTarget" aria-label="Target shoot">
+    ? `<div class="asset-menu-title">Add to board</div>
+      <select class="asset-menu-target" id="assetMenuTarget" aria-label="Target board">
         ${state.shoots
           .map(
             (shoot) => `<option value="${escapeHtml(shoot.id)}" ${shoot.id === currentShootId ? "selected" : ""}>${escapeHtml(shoot.name)}${shoot.id === state.currentShootId ? " (current)" : ""}</option>`,
@@ -848,14 +1108,14 @@ function showAssetMenu(id, x, y) {
 function openImportDialog() {
   const handle = state.handle || "elizavetaporodina";
   $("#importHandle").value = handle ? `https://www.instagram.com/${handle}/` : "";
-  $("#folderPath").value = `downloads/${handle}/originals`;
+  $("#folderPath").value = "";
   if (state.config.chrome_cookiefile) $("#cookieFile").value = state.config.chrome_cookiefile;
   $("#importDialog").showModal();
 }
 
 function openShootDialog() {
   const nextNumber = state.shoots.length + 1;
-  $("#shootName").value = `Shoot ${nextNumber}`;
+  $("#shootName").value = `Board ${nextNumber}`;
   $("#shootDialog").showModal();
   $("#shootName").focus();
 }
@@ -863,6 +1123,7 @@ function openShootDialog() {
 async function startFolderScan() {
   const handle = $("#importHandle").value.trim();
   const path = $("#folderPath").value.trim();
+  if (!path) throw new Error("Choose a local image folder first.");
   await api("/api/import-folder", {
     method: "POST",
     body: JSON.stringify({ handle, path }),
@@ -873,10 +1134,12 @@ async function startFolderScan() {
 
 async function startInstagramImport(profileValue = null) {
   const maxPages = $("#importPages").value.trim();
+  const profile = (profileValue || $("#importHandle").value).trim();
+  if (!profile) throw new Error("Paste an Instagram profile link first.");
   await api("/api/import-instagram", {
     method: "POST",
     body: JSON.stringify({
-      profile: (profileValue || $("#importHandle").value).trim(),
+      profile,
       browser: $("#importBrowser").value,
       cookiefile: $("#cookieFile").value.trim(),
       max_pages: maxPages ? Number(maxPages) : null,
@@ -887,17 +1150,6 @@ async function startInstagramImport(profileValue = null) {
 }
 
 function bindEvents() {
-  $("#libraryName").addEventListener("click", () => {
-    const name = window.prompt("Rename library", state.libraryName);
-    if (name === null) return;
-    const nextName = name.trim();
-    if (!nextName) return;
-    state.libraryName = nextName;
-    localStorage.setItem("palette-studio.library-name", nextName);
-    document.title = nextName;
-    renderSidebar();
-  });
-
   $("#statusNav").addEventListener("click", (event) => {
     const button = event.target.closest("[data-filter]");
     if (!button) return;
@@ -905,7 +1157,18 @@ function bindEvents() {
     state.shootViewId = "";
     state.view = "grid";
     state.cullSelections.clear();
+    clearRandomization();
     state.filter = button.dataset.filter;
+    if (state.filter === "all") state.handle = "";
+    loadLibrary({ keepSelection: false }).catch(console.error);
+  });
+
+  $("#randomizeLibrary").addEventListener("click", () => {
+    state.focusId = "";
+    state.view = "grid";
+    state.cullSelections.clear();
+    state.randomized = true;
+    state.randomOrder = [];
     loadLibrary({ keepSelection: false }).catch(console.error);
   });
 
@@ -916,6 +1179,7 @@ function bindEvents() {
     state.shootViewId = "";
     state.view = "grid";
     state.cullSelections.clear();
+    clearRandomization();
     state.handle = button.dataset.handle;
     loadLibrary({ keepSelection: false }).catch(console.error);
   });
@@ -930,6 +1194,12 @@ function bindEvents() {
   $("#shootList").addEventListener("click", (event) => {
     const button = event.target.closest("[data-shoot]");
     if (button) setCurrentShoot(button.dataset.shoot, true).catch((error) => alert(error.message));
+  });
+  $("#shootList").addEventListener("contextmenu", (event) => {
+    const button = event.target.closest("[data-shoot]");
+    if (!button?.dataset.shoot) return;
+    event.preventDefault();
+    showShootMenu(button.dataset.shoot, event.clientX, event.clientY);
   });
 
   $("#cullMode").addEventListener("click", () => {
@@ -949,6 +1219,11 @@ function bindEvents() {
       return;
     }
     const card = event.target.closest(".asset-open");
+    if (card) selectItem(card.dataset.id);
+  });
+
+  $("#gridView").addEventListener("dblclick", (event) => {
+    const card = event.target.closest(".asset-open");
     if (card) openImageFocus(card.dataset.id);
   });
 
@@ -966,6 +1241,7 @@ function bindEvents() {
   });
   $("#ratingSort").addEventListener("change", (event) => {
     state.ratingSort = event.target.value;
+    if (state.ratingSort) clearRandomization();
     render();
   });
   $("#colorFilterBar").addEventListener("click", (event) => {
@@ -986,6 +1262,18 @@ function bindEvents() {
   $$("[data-close-filter]").forEach((button) => button.addEventListener("click", closeFilterPopovers));
 
   $("#openImport").addEventListener("click", openImportDialog);
+  $("#openImportHistory").addEventListener("click", () => openImportHistory().catch((error) => alert(error.message)));
+  $("#jobStrip").addEventListener("click", (event) => {
+    const control = event.target.closest("[data-job-action]");
+    if (control) {
+      controlImportJob(control.dataset.jobId, control.dataset.jobAction).catch((error) => alert(error.message));
+      return;
+    }
+    const button = event.target.closest("[data-dismiss-job]");
+    if (!button) return;
+    state.dismissedJobIds.add(button.dataset.dismissJob);
+    renderJobs();
+  });
   $("#newShoot").addEventListener("click", openShootDialog);
   $("#createShoot").addEventListener("click", (event) => {
     event.preventDefault();
@@ -997,6 +1285,24 @@ function bindEvents() {
   });
   $("#scanFolder").addEventListener("click", () => startFolderScan().catch((error) => alert(error.message)));
   $("#startImport").addEventListener("click", () => startInstagramImport().catch((error) => alert(error.message)));
+
+  $("#importHistoryList").addEventListener("click", (event) => {
+    const row = event.target.closest("[data-import-history]");
+    if (!row) return;
+    state.selectedImportId = row.dataset.importHistory;
+    renderImportHistory();
+  });
+  $("#deleteImportBatch").addEventListener("click", openDeleteImportDialog);
+  $("#deleteImportForm").addEventListener("submit", (event) => {
+    event.preventDefault();
+    deleteImportBatch().catch((error) => alert(error.message));
+  });
+  ["#cancelDeleteImport", "#cancelDeleteImportSecondary"].forEach((selector) => {
+    $(selector).addEventListener("click", () => {
+      $("#deleteImportDialog").close();
+      state.deletingImportId = "";
+    });
+  });
 
   $("#cullGrid").addEventListener("click", (event) => {
     const card = event.target.closest("[data-cull-id]");
@@ -1063,18 +1369,63 @@ function bindEvents() {
   $("#assetMenu").addEventListener("contextmenu", (event) => event.preventDefault());
   $("#handleMenu").addEventListener("click", (event) => {
     event.stopPropagation();
-    if (!event.target.closest("[data-rename-handle]") || !state.contextHandle) return;
-    const original = state.contextHandle;
-    const name = window.prompt("Rename handle", handleLabel(original));
-    if (name === null) return;
-    const alias = name.trim();
-    if (alias) state.handleAliases[original] = alias;
-    else delete state.handleAliases[original];
-    localStorage.setItem("palette-studio.handle-aliases", JSON.stringify(state.handleAliases));
-    hideHandleMenu();
-    renderSidebar();
+    if (!state.contextHandle) return;
+    if (event.target.closest("[data-delete-handle]")) {
+      const handle = state.contextHandle;
+      openDeleteHandleDialog(handle);
+      return;
+    }
+    if (event.target.closest("[data-rename-handle]")) openRenameHandleDialog(state.contextHandle);
   });
   $("#handleMenu").addEventListener("contextmenu", (event) => event.preventDefault());
+  $("#renameHandleForm").addEventListener("submit", (event) => {
+    event.preventDefault();
+    saveHandleAlias();
+  });
+  ["#cancelRenameHandle", "#cancelRenameHandleSecondary"].forEach((selector) => {
+    $(selector).addEventListener("click", () => {
+      $("#renameHandleDialog").close();
+      state.renamingHandle = "";
+    });
+  });
+  $("#deleteHandleForm").addEventListener("submit", (event) => {
+    event.preventDefault();
+    deleteHandle().catch((error) => alert(error.message));
+  });
+  ["#cancelDeleteHandle", "#cancelDeleteHandleSecondary"].forEach((selector) => {
+    $(selector).addEventListener("click", () => {
+      $("#deleteHandleDialog").close();
+      state.deletingHandle = "";
+    });
+  });
+  $("#shootMenu").addEventListener("click", (event) => {
+    event.stopPropagation();
+    const shootId = state.contextShootId;
+    if (!shootId) return;
+    if (event.target.closest("[data-rename-shoot]")) openRenameShootDialog(shootId);
+    if (event.target.closest("[data-delete-shoot]")) openDeleteShootDialog(shootId);
+  });
+  $("#shootMenu").addEventListener("contextmenu", (event) => event.preventDefault());
+  $("#renameShootForm").addEventListener("submit", (event) => {
+    event.preventDefault();
+    saveShootName().catch((error) => alert(error.message));
+  });
+  ["#cancelRenameShoot", "#cancelRenameShootSecondary"].forEach((selector) => {
+    $(selector).addEventListener("click", () => {
+      $("#renameShootDialog").close();
+      state.renamingShootId = "";
+    });
+  });
+  $("#deleteShootForm").addEventListener("submit", (event) => {
+    event.preventDefault();
+    deleteShoot().catch((error) => alert(error.message));
+  });
+  ["#cancelDeleteShoot", "#cancelDeleteShootSecondary"].forEach((selector) => {
+    $(selector).addEventListener("click", () => {
+      $("#deleteShootDialog").close();
+      state.deletingShootId = "";
+    });
+  });
   $("#exitFocus").addEventListener("click", closeImageFocus);
   $("#focusPrevious").addEventListener("click", () => stepFocus(-1));
   $("#focusNext").addEventListener("click", () => stepFocus(1));
@@ -1090,6 +1441,7 @@ function bindEvents() {
   window.addEventListener("click", (event) => {
     if (!event.target.closest("#assetMenu")) hideAssetMenu();
     if (!event.target.closest("#handleMenu")) hideHandleMenu();
+    if (!event.target.closest("#shootMenu")) hideShootMenu();
     if (!event.target.closest(".filter-popover") && !event.target.closest(".library-filter-actions")) closeFilterPopovers();
   });
 
@@ -1135,8 +1487,16 @@ function bindEvents() {
     if (event.target.matches("input, textarea, select")) return;
     if (state.focusId) {
       if (event.key === "Escape") closeImageFocus();
-      if (event.key === "ArrowRight") stepFocus(1);
-      if (event.key === "ArrowLeft") stepFocus(-1);
+      if (event.key.startsWith("Arrow")) {
+        event.preventDefault();
+        if (event.key === "ArrowRight") stepFocus(1);
+        if (event.key === "ArrowLeft") stepFocus(-1);
+      }
+      return;
+    }
+    if (event.key.startsWith("Arrow")) {
+      event.preventDefault();
+      moveGridSelection(event.key);
       return;
     }
     if (event.key === "Escape") hideAssetMenu();
@@ -1183,7 +1543,8 @@ function endDrag() {
 }
 
 async function init() {
-  state.libraryName = localStorage.getItem("palette-studio.library-name") || "Palette Studio";
+  const savedLibraryName = localStorage.getItem("palette-studio.library-name");
+  state.libraryName = !savedLibraryName || savedLibraryName === "Palette Studio" ? "Jade" : savedLibraryName;
   try {
     state.handleAliases = JSON.parse(localStorage.getItem("palette-studio.handle-aliases") || "{}");
   } catch {

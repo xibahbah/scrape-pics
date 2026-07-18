@@ -10,18 +10,18 @@ int main(int argc, char *argv[]) {
   char *last_slash;
 
   if (argc < 1 || !realpath(argv[0], executable_path)) {
-    perror("Palette Studio could not locate its launcher");
+    perror("Jade could not locate its launcher");
     return 1;
   }
 
   last_slash = strrchr(executable_path, '/');
   if (!last_slash) {
-    fputs("Palette Studio has an invalid app location.\n", stderr);
+    fputs("Jade has an invalid app location.\n", stderr);
     return 1;
   }
   *last_slash = '\0';
   snprintf(launcher_path, sizeof(launcher_path), "%s/palette-studio-launcher", executable_path);
   execl("/bin/zsh", "zsh", launcher_path, (char *)NULL);
-  perror("Palette Studio could not start");
+  perror("Jade could not start");
   return 1;
 }

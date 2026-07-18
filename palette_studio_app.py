@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Open Palette Studio as a desktop app window."""
+"""Open Jade as a desktop app window."""
 
 from __future__ import annotations
 
@@ -24,14 +24,22 @@ def main() -> int:
     thread.start()
 
     try:
-        webview.create_window(
-            "Palette Studio",
+        window = webview.create_window(
+            "Jade",
             f"http://{host}:{port}",
             width=1440,
             height=920,
             min_size=(980, 680),
-            background_color="#111214",
+            background_color="#181918",
         )
+
+        def minimize_on_close() -> bool:
+            # Treat the red window control like a hide-to-Dock action. This
+            # keeps the local library process alive and ready to reopen.
+            window.minimize()
+            return False
+
+        window.events.closing += minimize_on_close
         webview.start()
     finally:
         server.shutdown()

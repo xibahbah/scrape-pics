@@ -65,6 +65,12 @@ def request_json(session: requests.Session, url: str, *, params: Optional[Dict[s
     for attempt in range(1, 5):
         try:
             response = session.get(url, params=params, timeout=45)
+            if response.status_code == 400:
+                try:
+                    detail = response.json().get("message") or response.text
+                except ValueError:
+                    detail = response.text
+                raise RuntimeError(f"Instagram replied 400: {str(detail).strip()[:300]}")
             if response.status_code in {403, 429, 500, 502, 503, 504}:
                 raise requests.HTTPError(f"{response.status_code} {response.reason}", response=response)
             response.raise_for_status()
@@ -72,6 +78,8 @@ def request_json(session: requests.Session, url: str, *, params: Optional[Dict[s
             if data.get("status") not in {None, "ok"}:
                 raise RuntimeError(f"Instagram returned status={data.get('status')!r}")
             return data
+        except RuntimeError:
+            raise
         except Exception as exc:  # noqa: BLE001 - command-line archiver needs retry context.
             last_error = exc
             if attempt == 4:
@@ -80,6 +88,25 @@ def request_json(session: requests.Session, url: str, *, params: Optional[Dict[s
             print(f"Request failed ({exc}); retrying in {wait}s...", flush=True)
             time.sleep(wait)
     raise RuntimeError(f"Could not fetch JSON from {url}: {last_error}")
+
+
+def profile_user(session: requests.Session, username: str) -> Dict[str, Any]:
+    """Fetch a profile and translate Instagram's current schema outage into a useful local error."""
+    try:
+        payload = request_json(
+            session,
+            "https://www.instagram.com/api/v1/users/web_profile_info/",
+            params={"username": username},
+        )
+        return payload["data"]["user"]
+    except Exception as exc:  # noqa: BLE001 - preserves the exact API failure for non-schema cases.
+        message = str(exc)
+        if "ig_business_category_subvertical" in message:
+            raise RuntimeError(
+                f"Instagram is currently refusing @{username}'s profile data because its business category points to a deleted Instagram field. "
+                "Your browser login is working; try this profile again later or import a different profile."
+            ) from exc
+        raise
 
 
 def best_image(media: Dict[str, Any]) -> Optional[Tuple[str, int, int]]:
@@ -189,11 +216,7 @@ def archive_profile(args: argparse.Namespace) -> int:
     image_dir.mkdir(parents=True, exist_ok=True)
 
     session = make_session(args, username)
-    profile_data = request_json(
-        session,
-        "https://www.instagram.com/api/v1/users/web_profile_info/",
-        params={"username": username},
-    )["data"]["user"]
+    profile_data = profile_user(session, username)
     user_id = profile_data["id"]
     expected_posts = ((profile_data.get("edge_owner_to_timeline_media") or {}).get("count"))
     print(f"Authenticated. @{username} user_id={user_id}; Instagram reports {expected_posts} posts.", flush=True)

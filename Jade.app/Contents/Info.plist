@@ -6,21 +6,25 @@
   <key>CFBundleDevelopmentRegion</key>
   <string>en</string>
   <key>CFBundleDisplayName</key>
-  <string>Palette Studio</string>
+  <string>Jade</string>
   <key>CFBundleExecutable</key>
-  <string>Palette Studio</string>
+  <string>Jade</string>
   <key>CFBundleIdentifier</key>
-  <string>local.palette-studio</string>
+  <string>com.keith.jade</string>
+  <key>CFBundleIconFile</key>
+  <string>Jade-v3.icns</string>
   <key>CFBundleInfoDictionaryVersion</key>
   <string>6.0</string>
   <key>CFBundleName</key>
-  <string>Palette Studio</string>
+  <string>Jade</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
-  <string>0.1.0</string>
+  <string>0.3.0</string>
   <key>CFBundleVersion</key>
-  <string>1</string>
+  <string>3</string>
+  <key>LSApplicationCategoryType</key>
+  <string>public.app-category.photography</string>
   <key>LSMinimumSystemVersion</key>
   <string>10.15</string>
   <key>NSHighResolutionCapable</key>

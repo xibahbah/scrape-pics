@@ -29,6 +29,7 @@ from instagram_web_archive import (
     iter_photo_media,
     make_session,
     parse_username,
+    profile_user,
     request_json,
     safe,
     taken_date,
@@ -42,7 +43,7 @@ IMPORT_DIR = DATA_DIR / "imports"
 THUMB_DIR = DATA_DIR / "thumbs"
 LIBRARY_PATH = DATA_DIR / "library.json"
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".tif", ".tiff"}
-SHOOT_COLLECTIONS = ("color", "lighting", "art_design", "pose", "reference")
+SHOOT_COLLECTIONS = ("makeup", "color", "lighting", "art_design", "pose", "reference")
 ARCHIVE_NAME_RE = re.compile(
     r"(?P<date>\d{4}-\d{2}-\d{2})_(?P<code>[A-Za-z0-9_-]{5,})_(?P<index>\d{2})_(?P<size>\d+x\d+)",
     re.IGNORECASE,
@@ -444,10 +445,11 @@ class LibraryStore:
                     data.setdefault("order", list(data["items"].keys()))
                     data.setdefault("shoots", {})
                     data.setdefault("current_shoot_id", "")
+                    data.setdefault("imports", {})
                     return data
             except (OSError, json.JSONDecodeError):
                 pass
-        return {"version": 2, "items": {}, "order": [], "shoots": {}, "current_shoot_id": ""}
+        return {"version": 2, "items": {}, "order": [], "shoots": {}, "current_shoot_id": "", "imports": {}}
 
     def save(self) -> None:
         DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -533,6 +535,10 @@ class LibraryStore:
             shoots = [dict(shoot) for shoot in self.data["shoots"].values()]
             current_shoot_id = self.data.get("current_shoot_id", "")
             items = list(self.data["items"].values())
+        for shoot in shoots:
+            legacy_default = re.fullmatch(r"Shoot (\d+)", str(shoot.get("name") or ""))
+            if legacy_default:
+                shoot["name"] = f"Board {legacy_default.group(1)}"
         counts = {shoot["id"]: {name: 0 for name in SHOOT_COLLECTIONS} for shoot in shoots}
         for item in items:
             for shoot_id, collection in (item.get("shoot_assignments") or {}).items():
@@ -570,6 +576,22 @@ class LibraryStore:
             self.save()
             return dict(shoot)
 
+    def delete_shoot(self, shoot_id: str) -> bool:
+        with self.lock:
+            if shoot_id not in self.data["shoots"]:
+                return False
+            self.data["shoots"].pop(shoot_id, None)
+            for item in self.data["items"].values():
+                assignments = dict(item.get("shoot_assignments") or {})
+                if shoot_id in assignments:
+                    assignments.pop(shoot_id, None)
+                    item["shoot_assignments"] = assignments
+                    item["updated_at"] = utc_now()
+            if self.data.get("current_shoot_id") == shoot_id:
+                self.data["current_shoot_id"] = next(iter(self.data["shoots"]), "")
+            self.save()
+            return True
+
     def assign_to_shoot(self, item_id: str, shoot_id: str, collection: str) -> Optional[Dict[str, Any]]:
         if collection not in SHOOT_COLLECTIONS:
             raise ValueError("Unknown shoot collection.")
@@ -598,6 +620,138 @@ class LibraryStore:
             item["updated_at"] = utc_now()
             self.save()
             return dict(item)
+
+    def delete_handle(self, handle: str) -> Dict[str, int]:
+        clean_handle = str(handle or "").strip()
+        if not clean_handle:
+            raise ValueError("Handle is required.")
+        with self.lock:
+            items = [dict(item) for item in self.data["items"].values() if item.get("handle") == clean_handle]
+
+        files_deleted = failed_files = 0
+        directories: set[Path] = set()
+        paths = {Path(str(item.get(field) or "")) for item in items for field in ("path", "thumb_path")}
+        for path in paths:
+            if not path or str(path) == ".":
+                continue
+            try:
+                resolved = path.expanduser().resolve()
+                if resolved.is_file():
+                    directories.add(resolved.parent)
+                    resolved.unlink()
+                    files_deleted += 1
+            except OSError:
+                failed_files += 1
+
+        with self.lock:
+            item_ids = {item["id"] for item in items}
+            for item_id in item_ids:
+                self.data["items"].pop(item_id, None)
+            self.data["order"] = [item_id for item_id in self.data["order"] if item_id not in item_ids]
+            self.save()
+
+        import_root = IMPORT_DIR.resolve()
+        for directory in sorted(directories, key=lambda path: len(path.parts), reverse=True):
+            current = directory
+            while current != import_root:
+                try:
+                    current.relative_to(import_root)
+                    current.rmdir()
+                except (OSError, ValueError):
+                    break
+                current = current.parent
+        return {"deleted": len(items), "files_deleted": files_deleted, "failed_files": failed_files}
+
+    def create_import(self, kind: str, handle: str, source: str) -> Dict[str, Any]:
+        import_id = uuid.uuid4().hex[:12]
+        record = {
+            "id": import_id,
+            "kind": kind,
+            "handle": handle,
+            "source": source,
+            "state": "running",
+            "created_at": utc_now(),
+            "finished_at": "",
+            "created": 0,
+            "updated": 0,
+            "skipped": 0,
+            "total": 0,
+            "error": "",
+        }
+        with self.lock:
+            self.data.setdefault("imports", {})[import_id] = record
+            self.save()
+        return dict(record)
+
+    def finish_import(self, import_id: str, job: Dict[str, Any]) -> None:
+        if not import_id:
+            return
+        with self.lock:
+            record = self.data.setdefault("imports", {}).get(import_id)
+            if not record:
+                return
+            for key in ("state", "created", "updated", "skipped", "total", "error"):
+                if key in job:
+                    record[key] = job[key]
+            record["finished_at"] = utc_now()
+            self.save()
+
+    def list_imports(self) -> List[Dict[str, Any]]:
+        with self.lock:
+            records = [dict(record) for record in self.data.setdefault("imports", {}).values()]
+            asset_counts: Dict[str, int] = {}
+            for item in self.data["items"].values():
+                import_id = str(item.get("import_id") or "")
+                if import_id:
+                    asset_counts[import_id] = asset_counts.get(import_id, 0) + 1
+        for record in records:
+            record["asset_count"] = asset_counts.get(record["id"], 0)
+        return sorted(records, key=lambda record: record.get("created_at", ""), reverse=True)
+
+    def delete_import(self, import_id: str) -> Dict[str, int]:
+        clean_id = str(import_id or "").strip()
+        if not clean_id:
+            raise ValueError("Import is required.")
+        with self.lock:
+            records = self.data.setdefault("imports", {})
+            if clean_id not in records:
+                raise ValueError("Import not found.")
+            items = [dict(item) for item in self.data["items"].values() if item.get("import_id") == clean_id]
+
+        files_deleted = failed_files = 0
+        directories: set[Path] = set()
+        paths = {Path(str(item.get(field) or "")) for item in items for field in ("path", "thumb_path")}
+        for path in paths:
+            if not path or str(path) == ".":
+                continue
+            try:
+                resolved = path.expanduser().resolve()
+                if resolved.is_file():
+                    directories.add(resolved.parent)
+                    resolved.unlink()
+                    files_deleted += 1
+            except OSError:
+                failed_files += 1
+
+        with self.lock:
+            item_ids = {item["id"] for item in items}
+            for item_id in item_ids:
+                self.data["items"].pop(item_id, None)
+            self.data["order"] = [item_id for item_id in self.data["order"] if item_id not in item_ids]
+            self.data.setdefault("imports", {}).pop(clean_id, None)
+            self.save()
+
+        import_root = IMPORT_DIR.resolve()
+        for directory in sorted(directories, key=lambda path: len(path.parts), reverse=True):
+            current = directory
+            while current != import_root:
+                try:
+                    current.relative_to(import_root)
+                    current.rmdir()
+                except (OSError, ValueError):
+                    break
+                current = current.parent
+        return {"deleted": len(items), "files_deleted": files_deleted, "failed_files": failed_files}
 
     def list_items(self, filter_name: str = "all", query: str = "", handle: str = "") -> List[Dict[str, Any]]:
         with self.lock:
@@ -662,9 +816,18 @@ STORE = LibraryStore(LIBRARY_PATH)
 def ensure_default_shoot() -> None:
     with STORE.lock:
         if STORE.data.get("shoots"):
+            # Keep user-created board names intact; only update the app's old
+            # first default name to match the new UI vocabulary.
+            changed = False
+            for board in STORE.data["shoots"].values():
+                if board.get("name") == "Shoot 1":
+                    board["name"] = "Board 1"
+                    changed = True
+            if changed:
+                STORE.save()
             return
         shoot_id = uuid.uuid4().hex[:12]
-        STORE.data["shoots"][shoot_id] = {"id": shoot_id, "name": "Shoot 1", "created_at": utc_now()}
+        STORE.data["shoots"][shoot_id] = {"id": shoot_id, "name": "Board 1", "created_at": utc_now()}
         STORE.data["current_shoot_id"] = shoot_id
         STORE.save()
 
@@ -672,6 +835,10 @@ def ensure_default_shoot() -> None:
 ensure_default_shoot()
 JOBS: Dict[str, Dict[str, Any]] = {}
 JOBS_LOCK = threading.RLock()
+
+
+class JobCancelled(RuntimeError):
+    """Raised inside a worker after the user cancels an import."""
 
 
 def make_job(kind: str, target: str) -> Dict[str, Any]:
@@ -687,6 +854,8 @@ def make_job(kind: str, target: str) -> Dict[str, Any]:
         "updated": 0,
         "skipped": 0,
         "error": "",
+        "pause_requested": False,
+        "cancel_requested": False,
         "created_at": utc_now(),
         "updated_at": utc_now(),
     }
@@ -705,6 +874,56 @@ def finish_job(job: Dict[str, Any], state: str = "done", error: str = "") -> Non
     update_job(job, state=state, error=error)
 
 
+def checkpoint_job(job: Optional[Dict[str, Any]]) -> None:
+    """Cooperatively pause or cancel an importer between network/file operations."""
+    if not job:
+        return
+    while True:
+        with JOBS_LOCK:
+            if job.get("cancel_requested"):
+                raise JobCancelled("Import cancelled.")
+            if not job.get("pause_requested"):
+                if job.get("state") == "paused":
+                    job["state"] = "running"
+                    job["message"] = "Importing"
+                    job["updated_at"] = utc_now()
+                return
+        time.sleep(0.2)
+
+
+def job_sleep(job: Optional[Dict[str, Any]], seconds: float) -> None:
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        checkpoint_job(job)
+        time.sleep(min(0.2, max(0.0, deadline - time.monotonic())))
+
+
+def control_job(job_id: str, action: str) -> Optional[Dict[str, Any]]:
+    with JOBS_LOCK:
+        job = JOBS.get(job_id)
+        if not job:
+            return None
+        if job.get("state") in {"done", "error", "cancelled"}:
+            return dict(job)
+        if action == "pause":
+            job["pause_requested"] = True
+            job["state"] = "paused"
+            job["message"] = "Paused"
+        elif action == "resume":
+            job["pause_requested"] = False
+            job["state"] = "running"
+            job["message"] = "Importing"
+        elif action == "cancel":
+            job["cancel_requested"] = True
+            job["pause_requested"] = False
+            job["state"] = "cancelling"
+            job["message"] = "Stopping"
+        else:
+            raise ValueError("Unknown job action.")
+        job["updated_at"] = utc_now()
+        return dict(job)
+
+
 def visible_item(item: Dict[str, Any]) -> Dict[str, Any]:
     copy = dict(item)
     item_id = copy["id"]
@@ -715,7 +934,7 @@ def visible_item(item: Dict[str, Any]) -> Dict[str, Any]:
     return copy
 
 
-def ingest_image(path: Path, handle: str, save: bool = True) -> Tuple[Dict[str, Any], bool]:
+def ingest_image(path: Path, handle: str, save: bool = True, import_id: str = "") -> Tuple[Dict[str, Any], bool]:
     metadata = archive_metadata(path, handle)
     item_id = item_id_for(metadata["source_key"])
     existing = STORE.get(item_id)
@@ -731,13 +950,19 @@ def ingest_image(path: Path, handle: str, save: bool = True) -> Tuple[Dict[str, 
         "title": path.stem,
         "tags": [tag for tag in {handle, "instagram"} if tag],
         "folders": [handle] if handle else [],
+        "import_id": import_id,
         **metadata,
         **analysis,
     }
     return STORE.upsert(item, save=save)
 
 
-def ingest_folder(path: Path, handle: str, job: Optional[Dict[str, Any]] = None) -> Dict[str, int]:
+def ingest_folder(
+    path: Path,
+    handle: str,
+    job: Optional[Dict[str, Any]] = None,
+    import_id: str = "",
+) -> Dict[str, int]:
     files = sorted(
         file
         for file in path.expanduser().resolve().iterdir()
@@ -748,8 +973,9 @@ def ingest_folder(path: Path, handle: str, job: Optional[Dict[str, Any]] = None)
 
     created = updated = skipped = 0
     for index, file in enumerate(files, start=1):
+        checkpoint_job(job)
         try:
-            _item, is_new = ingest_image(file, handle, save=False)
+            _item, is_new = ingest_image(file, handle, save=False, import_id=import_id)
             if is_new:
                 created += 1
             else:
@@ -822,18 +1048,24 @@ def run_in_thread(job: Dict[str, Any], target) -> None:
         try:
             target(job)
             finish_job(job)
+        except JobCancelled:
+            finish_job(job, state="cancelled", error="")
         except Exception as exc:  # noqa: BLE001 - job boundary should capture failures.
             finish_job(job, state="error", error=str(exc))
+        finally:
+            STORE.finish_import(str(job.get("import_id") or ""), job)
 
     thread = threading.Thread(target=runner, daemon=True)
     thread.start()
 
 
 def start_folder_job(path: Path, handle: str) -> Dict[str, Any]:
+    record = STORE.create_import("folder", handle, str(path.expanduser().resolve()))
     job = make_job("folder", str(path))
+    job["import_id"] = record["id"]
 
     def work(current: Dict[str, Any]) -> None:
-        ingest_folder(path, handle, current)
+        ingest_folder(path, handle, current, import_id=record["id"])
 
     run_in_thread(job, work)
     return job
@@ -845,7 +1077,9 @@ def start_instagram_job(payload: Dict[str, Any]) -> Dict[str, Any]:
     if not username:
         raise RuntimeError("Instagram handle is required.")
 
+    record = STORE.create_import("instagram", username, profile)
     job = make_job("instagram", username)
+    job["import_id"] = record["id"]
 
     def work(current: Dict[str, Any]) -> None:
         browser = str(payload.get("browser") or "chrome")
@@ -861,12 +1095,10 @@ def start_instagram_job(payload: Dict[str, Any]) -> Dict[str, Any]:
         video_thumbnails = bool(payload.get("video_thumbnails"))
 
         args = argparse.Namespace(browser=browser, cookiefile=cookiefile)
+        checkpoint_job(current)
         session = make_session(args, username)
-        profile_data = request_json(
-            session,
-            "https://www.instagram.com/api/v1/users/web_profile_info/",
-            params={"username": username},
-        )["data"]["user"]
+        checkpoint_job(current)
+        profile_data = profile_user(session, username)
         user_id = profile_data["id"]
         expected_posts = (profile_data.get("edge_owner_to_timeline_media") or {}).get("count") or 0
         update_job(current, total=expected_posts, message="Importing")
@@ -878,6 +1110,7 @@ def start_instagram_job(payload: Dict[str, Any]) -> Dict[str, Any]:
         seen_post_ids = set()
 
         while True:
+            checkpoint_job(current)
             page += 1
             if max_pages is not None and page > max_pages:
                 break
@@ -890,6 +1123,7 @@ def start_instagram_job(payload: Dict[str, Any]) -> Dict[str, Any]:
                 break
 
             for item in items:
+                checkpoint_job(current)
                 post_id = str(item.get("id") or item.get("pk") or "")
                 if post_id and post_id in seen_post_ids:
                     continue
@@ -900,6 +1134,7 @@ def start_instagram_job(payload: Dict[str, Any]) -> Dict[str, Any]:
                 post_url = f"https://www.instagram.com/p/{code}/"
                 date_part = taken_date(item)
                 for media_index, media in iter_photo_media(item, video_thumbnails):
+                    checkpoint_job(current)
                     image = best_image(media)
                     if not image:
                         continue
@@ -930,6 +1165,7 @@ def start_instagram_job(payload: Dict[str, Any]) -> Dict[str, Any]:
                         "taken_date_utc": date_part,
                         "tags": [username, "instagram"],
                         "folders": [username],
+                        "import_id": record["id"],
                         **analysis,
                     }
                     _stored, is_new = STORE.upsert(library_item)
@@ -938,7 +1174,7 @@ def start_instagram_job(payload: Dict[str, Any]) -> Dict[str, Any]:
                         created=current["created"] + (1 if is_new else 0),
                         updated=current["updated"] + (0 if is_new else 1),
                     )
-                    time.sleep(image_delay)
+                    job_sleep(current, image_delay)
 
                 update_job(current, done=current["done"] + 1, message=f"Page {page}")
 
@@ -947,14 +1183,14 @@ def start_instagram_job(payload: Dict[str, Any]) -> Dict[str, Any]:
             max_id = data.get("next_max_id")
             if not max_id:
                 break
-            time.sleep(page_delay)
+            job_sleep(current, page_delay)
 
     run_in_thread(job, work)
     return job
 
 
 class StudioHandler(BaseHTTPRequestHandler):
-    server_version = "PaletteStudio/0.1"
+    server_version = "Jade/0.1"
 
     def do_HEAD(self) -> None:
         parsed = urlparse(self.path)
@@ -985,6 +1221,9 @@ class StudioHandler(BaseHTTPRequestHandler):
                 jobs = sorted(JOBS.values(), key=lambda job: job["created_at"], reverse=True)
             self.send_json({"jobs": jobs[:20]})
             return
+        if parsed.path == "/api/imports":
+            self.send_json({"imports": STORE.list_imports()})
+            return
         if parsed.path == "/api/config":
             self.send_json({"chrome_cookiefile": guess_chrome_cookiefile() or ""})
             return
@@ -998,6 +1237,18 @@ class StudioHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
+        if parsed.path.startswith("/api/jobs/") and parsed.path.endswith("/control"):
+            job_id = parsed.path.removeprefix("/api/jobs/").removesuffix("/control").strip("/")
+            try:
+                job = control_job(job_id, str(self.read_json().get("action") or ""))
+            except ValueError as exc:
+                self.send_json({"error": str(exc)}, status=400)
+                return
+            if not job:
+                self.send_json({"error": "Import job not found."}, status=404)
+                return
+            self.send_json({"job": job})
+            return
         if parsed.path == "/api/shoots":
             try:
                 shoot = STORE.create_shoot(self.read_json().get("name", ""))
@@ -1061,6 +1312,31 @@ class StudioHandler(BaseHTTPRequestHandler):
 
     def do_DELETE(self) -> None:
         parsed = urlparse(self.path)
+        if parsed.path.startswith("/api/shoots/"):
+            shoot_id = parsed.path.removeprefix("/api/shoots/").strip("/")
+            if not STORE.delete_shoot(shoot_id):
+                self.send_json({"error": "Shoot not found."}, status=404)
+                return
+            self.send_json({"shoot_id": shoot_id, **STORE.list_shoots()})
+            return
+        if parsed.path.startswith("/api/imports/"):
+            import_id = parsed.path.removeprefix("/api/imports/").strip("/")
+            try:
+                result = STORE.delete_import(import_id)
+            except ValueError as exc:
+                self.send_json({"error": str(exc)}, status=404)
+                return
+            self.send_json({"import_id": import_id, **result, "stats": STORE.stats(), **STORE.list_shoots()})
+            return
+        if parsed.path.startswith("/api/handles/"):
+            handle = unquote(parsed.path.removeprefix("/api/handles/")).strip("/")
+            try:
+                result = STORE.delete_handle(handle)
+            except ValueError as exc:
+                self.send_json({"error": str(exc)}, status=400)
+                return
+            self.send_json({"handle": handle, **result, "stats": STORE.stats(), **STORE.list_shoots()})
+            return
         if parsed.path.startswith("/api/items/") and parsed.path.endswith("/shoot-assignment"):
             item_id = parsed.path.removeprefix("/api/items/").removesuffix("/shoot-assignment").strip("/")
             shoot_id = parse_qs(parsed.query).get("shoot_id", [""])[0]
@@ -1132,7 +1408,7 @@ def serve(host: str, port: int) -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     THUMB_DIR.mkdir(parents=True, exist_ok=True)
     server = ThreadingHTTPServer((host, port), StudioHandler)
-    print(f"Palette Studio running at http://{host}:{port}")
+    print(f"Jade running at http://{host}:{port}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
