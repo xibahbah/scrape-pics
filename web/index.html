@@ -15,6 +15,9 @@
           <button class="nav-item active" data-filter="all">
             <i data-lucide="images"></i><span>All pictures</span><strong data-count="all">0</strong>
           </button>
+          <button class="nav-item" data-filter="favorites">
+            <i data-lucide="star"></i><span>Favorites</span><strong data-count="favorites">0</strong>
+          </button>
           <button class="nav-item" id="cullMode">
             <i data-lucide="list-checks"></i><span>Review</span>
           </button>
@@ -47,6 +50,9 @@
       <main class="workspace">
         <header class="library-toolbar" aria-label="Library filters">
           <div class="library-filter-actions">
+            <button class="library-filter-button" id="reviewToggle" title="Open review">
+              <i data-lucide="list-checks"></i><span>Review</span>
+            </button>
             <button class="library-filter-button" id="colorFilterToggle" title="Filter by color">
               <i data-lucide="palette"></i><span>Color</span>
             </button>
@@ -146,17 +152,29 @@
           </button>
         </div>
 
+        <div class="import-mode" role="group" aria-label="Instagram import type">
+          <button class="import-mode-button active" type="button" data-import-mode="profile">Profile</button>
+          <button class="import-mode-button" type="button" data-import-mode="post">Single post</button>
+        </div>
+
         <label class="field">
-          <span>Instagram profile link</span>
+          <span id="importSourceLabel">Instagram profile link</span>
           <input
             id="importHandle"
             type="text"
             value="https://www.instagram.com/elizavetaporodina/"
+            placeholder="https://www.instagram.com/photographer/"
             autocomplete="off"
           />
         </label>
 
-        <div class="field-grid">
+        <label class="field" id="postDestinationField" hidden>
+          <span>Save to photographer</span>
+          <input id="postDestination" type="text" list="photographerDestinations" placeholder="Create from post owner" autocomplete="off" />
+          <datalist id="photographerDestinations"></datalist>
+        </label>
+
+        <div class="field-grid" id="profileImportFields">
           <label class="field">
             <span>Browser</span>
             <select id="importBrowser">
@@ -180,7 +198,7 @@
 
         <div class="dialog-actions">
           <button type="button" class="primary-button" id="startImport">
-            <i data-lucide="instagram"></i><span>Import Instagram</span>
+            <i data-lucide="instagram"></i><span id="startImportLabel">Import profile</span>
           </button>
         </div>
 

@@ -148,8 +148,8 @@ def taken_date(item: Dict[str, Any]) -> str:
     return "unknown-date"
 
 
-def download_image(session: requests.Session, url: str, path: Path, referer: str) -> int:
-    if path.exists() and path.stat().st_size > 0:
+def download_image(session: requests.Session, url: str, path: Path, referer: str, *, force: bool = False) -> int:
+    if not force and path.exists() and path.stat().st_size > 0:
         return path.stat().st_size
 
     headers = {
@@ -207,6 +207,21 @@ def make_session(args: argparse.Namespace, username: str) -> requests.Session:
     return session
 
 
+def require_logged_in_session(session: requests.Session, source_name: str = "your browser") -> None:
+    """Fail early when a copied browser cookie exists but the Instagram login is stale."""
+    response = session.get(
+        "https://www.instagram.com/accounts/activity/",
+        timeout=45,
+        allow_redirects=False,
+    )
+    location = str(response.headers.get("location") or "").lower()
+    if response.status_code in {301, 302, 303, 307, 308} and "/accounts/login" in location:
+        raise RuntimeError(
+            f"Instagram login expired in {source_name}. Sign back into Instagram in that browser profile, "
+            "then retry the import. The target account was not deleted."
+        )
+
+
 def archive_profile(args: argparse.Namespace) -> int:
     username = parse_username(args.profile)
     out_dir = args.output_dir / username
@@ -216,6 +231,8 @@ def archive_profile(args: argparse.Namespace) -> int:
     image_dir.mkdir(parents=True, exist_ok=True)
 
     session = make_session(args, username)
+    source_name = Path(args.cookiefile).parent.name if args.cookiefile else args.browser
+    require_logged_in_session(session, source_name)
     profile_data = profile_user(session, username)
     user_id = profile_data["id"]
     expected_posts = ((profile_data.get("edge_owner_to_timeline_media") or {}).get("count"))

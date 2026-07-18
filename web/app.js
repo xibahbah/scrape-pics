@@ -39,6 +39,7 @@ const state = {
   deletingShootId: "",
   randomized: false,
   randomOrder: [],
+  importMode: "profile",
 };
 
 const $ = (selector, root = document) => root.querySelector(selector);
@@ -138,7 +139,7 @@ async function loadJobs() {
 }
 
 function importLabel(record) {
-  const source = record.kind === "instagram" ? "Instagram" : "Folder scan";
+  const source = record.kind === "instagram" ? "Instagram" : record.kind === "instagram_post" ? "Instagram post" : "Folder scan";
   return `${source} - ${record.handle ? `@${record.handle}` : "Library"}`;
 }
 
@@ -215,6 +216,14 @@ function render() {
   iconRefresh();
 }
 
+function toggleReview() {
+  const opening = state.view !== "review";
+  state.focusId = "";
+  state.cullSelections.clear();
+  state.view = opening ? "review" : "grid";
+  render();
+}
+
 function renderSidebar() {
   const counts = state.stats.counts || {};
   $$("[data-count]").forEach((node) => {
@@ -224,6 +233,7 @@ function renderSidebar() {
     button.classList.toggle("active", button.dataset.filter === state.filter && !state.randomized);
   });
   $("#cullMode").classList.toggle("active", state.view === "review");
+  $("#reviewToggle").classList.toggle("active", state.view === "review");
 
   const handles = state.stats.handles || [];
   $("#handleList").innerHTML = handles
@@ -385,7 +395,11 @@ function renderGrid() {
   }
   const items = filteredItems();
   if (!items.length) {
-    grid.innerHTML = `<div class="empty-state">No assets</div>`;
+    if (state.filter === "favorites") {
+      grid.innerHTML = `<div class="empty-state empty-favorites"><strong>No favorites yet</strong><button type="button" class="empty-action" data-show-all>Show all pictures</button></div>`;
+    } else {
+      grid.innerHTML = `<div class="empty-state">No assets</div>`;
+    }
     return;
   }
   grid.innerHTML = items.map((item) => assetCard(item)).join("");
@@ -572,6 +586,25 @@ function applyFocusZoom() {
   image.style.height = `${Math.max(1, image.naturalHeight * fit * state.focusZoom)}px`;
 }
 
+function setFocusZoom(zoom, clientX = null, clientY = null) {
+  const stage = $("#focusStage");
+  const previousZoom = state.focusZoom;
+  const nextZoom = Math.max(0.2, Math.min(3, zoom));
+  if (Math.abs(nextZoom - previousZoom) < 0.001) return;
+
+  // Keep the point beneath the cursor in place while a trackpad pinch changes scale.
+  if (stage && clientX !== null && clientY !== null) {
+    const rect = stage.getBoundingClientRect();
+    const scale = nextZoom / previousZoom;
+    stage.scrollLeft = (stage.scrollLeft + clientX - rect.left) * scale - (clientX - rect.left);
+    stage.scrollTop = (stage.scrollTop + clientY - rect.top) * scale - (clientY - rect.top);
+  }
+  state.focusZoom = nextZoom;
+  $("#focusZoomInput").value = String(Math.round(nextZoom * 100));
+  $("#focusZoomValue").textContent = `${Math.round(nextZoom * 100)}%`;
+  applyFocusZoom();
+}
+
 function beginFocusDrag(event) {
   const stage = event.target.closest("#focusStage");
   if (!stage || event.button !== 0) return;
@@ -707,6 +740,7 @@ function updateCounts(previousStatus, nextStatus) {
 function itemMatchesCurrentFilter(item) {
   if (!item) return false;
   if (state.filter === "all") return true;
+  if (state.filter === "favorites") return Boolean(item.favorite && item.status !== "reject");
   if (state.filter === "reviewed") return item.status !== "unreviewed";
   return item.status === state.filter;
 }
@@ -721,6 +755,27 @@ async function patchItem(id, patch) {
   const index = state.items.findIndex((asset) => asset.id === id);
   if (index >= 0) state.items[index] = data.item;
   return data.item;
+}
+
+function updateFavoriteCount(previous, updated) {
+  const wasFavorite = Boolean(previous?.favorite && previous?.status !== "reject");
+  const isFavorite = Boolean(updated?.favorite && updated?.status !== "reject");
+  if (wasFavorite === isFavorite) return;
+  const counts = state.stats.counts || (state.stats.counts = {});
+  counts.favorites = Math.max(0, Number(counts.favorites || 0) + (isFavorite ? 1 : -1));
+}
+
+async function toggleFavorite(itemId) {
+  const previous = state.items.find((item) => item.id === itemId);
+  if (!previous) return;
+  const updated = await patchItem(itemId, { favorite: !previous.favorite });
+  updateFavoriteCount(previous, updated);
+  hideAssetMenu();
+  if (state.filter === "favorites" && !updated.favorite) {
+    state.items = state.items.filter((item) => item.id !== updated.id);
+    state.selectedId = state.items[0]?.id || null;
+  }
+  render();
 }
 
 async function patchSelected(patch) {
@@ -827,6 +882,7 @@ async function setStatus(status) {
   }
 
   const updated = await patchSelected({ status });
+  if (updated) updateFavoriteCount(item, updated);
   if (status === "reject" && updated) {
     state.items = state.items.filter((item) => item.id !== updated.id);
     state.selectedId = state.items[0]?.id || null;
@@ -1095,7 +1151,8 @@ function showAssetMenu(id, x, y) {
         )
         .join("")}</div>`
     : "";
-  menu.innerHTML = `${shootOptions}<div class="asset-menu-divider"></div><button class="asset-menu-action asset-menu-reject" data-menu-reject><i data-lucide="x"></i><span>Reject image</span></button>`;
+  const favoriteLabel = item.favorite ? "Remove from favorites" : "Add to favorites";
+  menu.innerHTML = `${shootOptions}<div class="asset-menu-divider"></div><button class="asset-menu-action" data-menu-favorite><i data-lucide="star"></i><span>${favoriteLabel}</span></button><button class="asset-menu-action asset-menu-reject" data-menu-reject><i data-lucide="x"></i><span>Reject image</span></button>`;
   menu.hidden = false;
   const maxX = Math.max(10, window.innerWidth - menu.offsetWidth - 10);
   const maxY = Math.max(10, window.innerHeight - menu.offsetHeight - 10);
@@ -1108,9 +1165,36 @@ function showAssetMenu(id, x, y) {
 function openImportDialog() {
   const handle = state.handle || "elizavetaporodina";
   $("#importHandle").value = handle ? `https://www.instagram.com/${handle}/` : "";
+  $("#postDestination").value = "";
+  populateImportDestinations();
+  setImportMode("profile");
   $("#folderPath").value = "";
   if (state.config.chrome_cookiefile) $("#cookieFile").value = state.config.chrome_cookiefile;
   $("#importDialog").showModal();
+}
+
+function populateImportDestinations() {
+  const destinations = $("#photographerDestinations");
+  destinations.innerHTML = (state.stats.handles || [])
+    .map(([handle]) => `<option value="${escapeHtml(handle)}"></option>`)
+    .join("");
+}
+
+function setImportMode(mode) {
+  const isPost = mode === "post";
+  state.importMode = isPost ? "post" : "profile";
+  $$('[data-import-mode]').forEach((button) => {
+    const active = button.dataset.importMode === state.importMode;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", String(active));
+  });
+  $("#importSourceLabel").textContent = isPost ? "Instagram post link" : "Instagram profile link";
+  $("#importHandle").placeholder = isPost
+    ? "https://www.instagram.com/p/post-code/"
+    : "https://www.instagram.com/photographer/";
+  $("#postDestinationField").hidden = !isPost;
+  $("#profileImportFields").hidden = isPost;
+  $("#startImportLabel").textContent = isPost ? "Import post" : "Import profile";
 }
 
 function openShootDialog() {
@@ -1121,7 +1205,7 @@ function openShootDialog() {
 }
 
 async function startFolderScan() {
-  const handle = $("#importHandle").value.trim();
+  const handle = state.importMode === "post" ? $("#postDestination").value.trim() : $("#importHandle").value.trim();
   const path = $("#folderPath").value.trim();
   if (!path) throw new Error("Choose a local image folder first.");
   await api("/api/import-folder", {
@@ -1134,16 +1218,24 @@ async function startFolderScan() {
 
 async function startInstagramImport(profileValue = null) {
   const maxPages = $("#importPages").value.trim();
-  const profile = (profileValue || $("#importHandle").value).trim();
-  if (!profile) throw new Error("Paste an Instagram profile link first.");
-  await api("/api/import-instagram", {
+  const source = (profileValue || $("#importHandle").value).trim();
+  const isPost = state.importMode === "post";
+  if (!source) throw new Error(`Paste an Instagram ${isPost ? "post" : "profile"} link first.`);
+  const payload = {
+    browser: $("#importBrowser").value,
+    cookiefile: $("#cookieFile").value.trim(),
+  };
+  const endpoint = isPost ? "/api/import-instagram-post" : "/api/import-instagram";
+  if (isPost) {
+    payload.post_url = source;
+    payload.destination_handle = $("#postDestination").value.trim();
+  } else {
+    payload.profile = source;
+    payload.max_pages = maxPages ? Number(maxPages) : null;
+  }
+  await api(endpoint, {
     method: "POST",
-    body: JSON.stringify({
-      profile,
-      browser: $("#importBrowser").value,
-      cookiefile: $("#cookieFile").value.trim(),
-      max_pages: maxPages ? Number(maxPages) : null,
-    }),
+    body: JSON.stringify(payload),
   });
   if ($("#importDialog").open) $("#importDialog").close();
   await loadJobs();
@@ -1202,12 +1294,8 @@ function bindEvents() {
     showShootMenu(button.dataset.shoot, event.clientX, event.clientY);
   });
 
-  $("#cullMode").addEventListener("click", () => {
-    state.focusId = "";
-    state.cullSelections.clear();
-    state.view = "review";
-    render();
-  });
+  $("#cullMode").addEventListener("click", toggleReview);
+  $("#reviewToggle").addEventListener("click", toggleReview);
 
   $("#gridView").addEventListener("click", (event) => {
     const menuButton = event.target.closest("[data-asset-menu]");
@@ -1285,6 +1373,9 @@ function bindEvents() {
   });
   $("#scanFolder").addEventListener("click", () => startFolderScan().catch((error) => alert(error.message)));
   $("#startImport").addEventListener("click", () => startInstagramImport().catch((error) => alert(error.message)));
+  $$('[data-import-mode]').forEach((button) => {
+    button.addEventListener("click", () => setImportMode(button.dataset.importMode));
+  });
 
   $("#importHistoryList").addEventListener("click", (event) => {
     const row = event.target.closest("[data-import-history]");
@@ -1356,6 +1447,10 @@ function bindEvents() {
 
   $("#assetMenu").addEventListener("click", (event) => {
     event.stopPropagation();
+    if (event.target.closest("[data-menu-favorite]")) {
+      toggleFavorite(state.contextItemId).catch((error) => alert(error.message));
+      return;
+    }
     if (event.target.closest("[data-menu-reject]")) {
       rejectItem(state.contextItemId).then(hideAssetMenu).catch((error) => alert(error.message));
       return;
@@ -1430,9 +1525,7 @@ function bindEvents() {
   $("#focusPrevious").addEventListener("click", () => stepFocus(-1));
   $("#focusNext").addEventListener("click", () => stepFocus(1));
   $("#focusZoomInput").addEventListener("input", (event) => {
-    state.focusZoom = Number(event.target.value) / 100;
-    $("#focusZoomValue").textContent = `${event.target.value}%`;
-    applyFocusZoom();
+    setFocusZoom(Number(event.target.value) / 100);
   });
   $("#focusDecision").addEventListener("change", (event) => {
     if (event.target.value !== "unreviewed") setStatus(event.target.value).catch((error) => alert(error.message));
@@ -1474,6 +1567,28 @@ function bindEvents() {
   });
 
   $("#focusView").addEventListener("pointerdown", beginFocusDrag);
+  $("#gridView").addEventListener("click", (event) => {
+    if (!event.target.closest("[data-show-all]")) return;
+    state.filter = "all";
+    state.handle = "";
+    loadLibrary({ keepSelection: false }).catch(console.error);
+  });
+  $("#focusView").addEventListener("wheel", (event) => {
+    // macOS emits Ctrl+wheel for a two-finger pinch inside WebKit.
+    if (!event.ctrlKey || !event.target.closest("#focusStage")) return;
+    event.preventDefault();
+    setFocusZoom(state.focusZoom * Math.exp(-event.deltaY * 0.01), event.clientX, event.clientY);
+  }, { passive: false });
+  $("#focusView").addEventListener("gesturestart", (event) => {
+    if (!event.target.closest("#focusStage")) return;
+    event.preventDefault();
+    state.focusGestureBaseZoom = state.focusZoom;
+  }, { passive: false });
+  $("#focusView").addEventListener("gesturechange", (event) => {
+    if (!event.target.closest("#focusStage")) return;
+    event.preventDefault();
+    setFocusZoom((state.focusGestureBaseZoom || state.focusZoom) * event.scale, event.clientX, event.clientY);
+  }, { passive: false });
   $("#sidebarResize").addEventListener("pointerdown", beginPanelResize);
   $("#inspectorResize").addEventListener("pointerdown", beginPanelResize);
   window.addEventListener("pointermove", (event) => {

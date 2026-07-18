@@ -9,6 +9,28 @@ from http.server import ThreadingHTTPServer
 from studio_server import DATA_DIR, THUMB_DIR, StudioHandler
 
 
+def configure_macos_window_close() -> None:
+    """Make only the red window control hide Jade; leave Quit to macOS."""
+    from webview.platforms.cocoa import BrowserView
+    from Foundation import NO, YES
+
+    class JadeWindowDelegate(BrowserView.WindowDelegate):
+        def windowShouldClose_(self, native_window):
+            native_window.orderOut_(None)
+            return NO
+
+    class JadeAppDelegate(BrowserView.AppDelegate):
+        def applicationShouldHandleReopen_hasVisibleWindows_(self, app, has_visible_windows):
+            if not has_visible_windows:
+                for instance in BrowserView.instances.values():
+                    instance.window.makeKeyAndOrderFront_(instance.window)
+                BrowserView.app.activateIgnoringOtherApps_(YES)
+            return YES
+
+    BrowserView.WindowDelegate = JadeWindowDelegate
+    BrowserView.AppDelegate = JadeAppDelegate
+
+
 def main() -> int:
     try:
         import webview
@@ -18,6 +40,7 @@ def main() -> int:
 
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     THUMB_DIR.mkdir(parents=True, exist_ok=True)
+    configure_macos_window_close()
     server = ThreadingHTTPServer(("127.0.0.1", 0), StudioHandler)
     host, port = server.server_address
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -33,13 +56,6 @@ def main() -> int:
             background_color="#181918",
         )
 
-        def minimize_on_close() -> bool:
-            # Treat the red window control like a hide-to-Dock action. This
-            # keeps the local library process alive and ready to reopen.
-            window.minimize()
-            return False
-
-        window.events.closing += minimize_on_close
         webview.start()
     finally:
         server.shutdown()

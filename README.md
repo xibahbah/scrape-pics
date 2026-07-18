@@ -1,4 +1,6 @@
-# Instagram to Eagle
+# Jade
+
+Jade is a local visual-reference library for collecting, reviewing, rating, and organizing image references into boards. Instagram imports are only for public content or images the user is allowed to archive.
 
 Small CLI tool that downloads images from an Instagram post/carousel or profile, compresses the images, creates a folder in Eagle, and imports the compressed files.
 
@@ -109,3 +111,23 @@ Index or refresh an existing Instagram archive:
 ```
 
 The app stores thumbnails, salience-aware palettes, highlight/midtone/shadow colors, skin/background suggestions, notes, shoot assignments, and keep/reject state in `app_data/`. Original files stay where they are unless you import a fresh handle from inside the app.
+
+## Build A Standalone macOS App
+
+The editable `Jade.app` in this repository is for development. Build a self-contained app bundle with:
+
+```bash
+scripts/build_macos_release.sh
+```
+
+The release app stores its library in `~/Library/Application Support/Jade`, so upgrades do not put user data inside the app bundle. The script produces `dist/Jade.app` and `dist/Jade.zip`.
+
+For a distributable app, use an Apple Developer ID certificate and notarize it:
+
+```bash
+CODE_SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" \
+NOTARYTOOL_PROFILE="jade-notary" \
+scripts/build_macos_release.sh
+```
+
+`jade-notary` is a Keychain profile created with `xcrun notarytool store-credentials`. Before selling or distributing Jade, provide a privacy policy, terms for Instagram imports, and clear guidance that customers may only archive content they have rights to use.

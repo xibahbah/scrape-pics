@@ -6,11 +6,13 @@ from __future__ import annotations
 import argparse
 import colorsys
 import hashlib
+from html import unescape
 import json
 import mimetypes
 import re
 import shutil
 import sqlite3
+import sys
 import threading
 import time
 import uuid
@@ -30,6 +32,7 @@ from instagram_web_archive import (
     make_session,
     parse_username,
     profile_user,
+    require_logged_in_session,
     request_json,
     safe,
     taken_date,
@@ -37,8 +40,14 @@ from instagram_web_archive import (
 
 
 ROOT = Path(__file__).resolve().parent
-WEB_DIR = ROOT / "web"
-DATA_DIR = ROOT / "app_data"
+# PyInstaller extracts bundled files to ``_MEIPASS``. Keep user data outside
+# that temporary directory so a packaged Jade app survives upgrades and relaunches.
+BUNDLE_ROOT = Path(getattr(sys, "_MEIPASS", ROOT))
+WEB_DIR = BUNDLE_ROOT / "web"
+if getattr(sys, "frozen", False):
+    DATA_DIR = Path.home() / "Library" / "Application Support" / "Jade"
+else:
+    DATA_DIR = ROOT / "app_data"
 IMPORT_DIR = DATA_DIR / "imports"
 THUMB_DIR = DATA_DIR / "thumbs"
 LIBRARY_PATH = DATA_DIR / "library.json"
@@ -48,6 +57,11 @@ ARCHIVE_NAME_RE = re.compile(
     r"(?P<date>\d{4}-\d{2}-\d{2})_(?P<code>[A-Za-z0-9_-]{5,})_(?P<index>\d{2})_(?P<size>\d+x\d+)",
     re.IGNORECASE,
 )
+POST_CODE_RE = re.compile(r"^[A-Za-z0-9_-]{5,120}$")
+EMBED_IMAGE_RE = re.compile(r'''https?[^"'\\\s]+scontent[^"'\\\s]+''')
+IMPORT_IMAGE_MAX_EDGE = 1440
+IMPORT_IMAGE_QUALITY = 88
+IMPORT_IMAGE_MAX_BYTES = 850_000
 
 
 def utc_now() -> str:
@@ -56,6 +70,55 @@ def utc_now() -> str:
 
 def item_id_for(source_key: str) -> str:
     return hashlib.sha1(source_key.encode("utf-8")).hexdigest()[:18]
+
+
+def parse_post_code(value: str) -> str:
+    """Return an Instagram shortcode from a post, reel, or TV URL."""
+    parsed = urlparse(str(value or "").strip())
+    if parsed.netloc and "instagram.com" in parsed.netloc.lower():
+        parts = [part for part in parsed.path.split("/") if part]
+        if len(parts) >= 2 and parts[0].lower() in {"p", "reel", "tv"}:
+            code = parts[1]
+            if POST_CODE_RE.fullmatch(code):
+                return code
+    raise RuntimeError("Paste a full Instagram post link.")
+
+
+def public_post_image_url(session: requests.Session, post_url: str, fallback_url: str) -> str:
+    """Find Instagram's highest signed post rendition exposed by the embed page."""
+    try:
+        response = session.get(f"{post_url.rstrip('/')}/embed/", timeout=45)
+        response.raise_for_status()
+    except requests.RequestException:
+        return fallback_url
+
+    filename = Path(urlparse(fallback_url).path).name
+    candidates = [
+        unescape(match.group(0))
+        for match in EMBED_IMAGE_RE.finditer(response.text)
+        if filename and Path(urlparse(unescape(match.group(0))).path).name == filename
+    ]
+    # The first matching `dst-jpg` rendition is Instagram's non-downscaled
+    # image. Other matches are the responsive 1080/720/640 thumbnails.
+    for candidate in candidates:
+        if "stp=dst-jpg_" in candidate and "_p" not in candidate.split("stp=", 1)[1].split("&", 1)[0]:
+            return candidate
+    return candidates[0] if candidates else fallback_url
+
+
+def normalize_import_image(path: Path) -> None:
+    """Keep Instagram imports sharp enough to inspect without keeping oversized originals."""
+    with Image.open(path) as opened:
+        image = image_to_rgb(opened)
+        largest_edge = max(image.size)
+        if largest_edge <= IMPORT_IMAGE_MAX_EDGE and path.stat().st_size <= IMPORT_IMAGE_MAX_BYTES:
+            return
+        scale = IMPORT_IMAGE_MAX_EDGE / largest_edge
+        target_size = (round(image.width * scale), round(image.height * scale))
+        resized = image.resize(target_size, Image.Resampling.LANCZOS)
+        tmp_path = path.with_suffix(path.suffix + ".normalized")
+        resized.save(tmp_path, "JPEG", quality=IMPORT_IMAGE_QUALITY, optimize=True, progressive=True)
+    tmp_path.replace(path)
 
 
 def hex_color(rgb: Sequence[int]) -> str:
@@ -361,10 +424,10 @@ def extract_context_colors(image: Image.Image) -> Dict[str, List[str]]:
     }
 
 
-def make_thumbnail(image: Image.Image, item_id: str) -> Path:
+def make_thumbnail(image: Image.Image, item_id: str, *, force: bool = False) -> Path:
     THUMB_DIR.mkdir(parents=True, exist_ok=True)
     thumb_path = THUMB_DIR / f"{item_id}.jpg"
-    if thumb_path.exists() and thumb_path.stat().st_size > 0:
+    if not force and thumb_path.exists() and thumb_path.stat().st_size > 0:
         return thumb_path
 
     thumbnail = image.copy()
@@ -373,13 +436,13 @@ def make_thumbnail(image: Image.Image, item_id: str) -> Path:
     return thumb_path
 
 
-def analyze_file(path: Path, item_id: str) -> Dict[str, Any]:
+def analyze_file(path: Path, item_id: str, *, refresh_thumbnail: bool = False) -> Dict[str, Any]:
     with Image.open(path) as opened:
         width, height = opened.size
         thumb_path = THUMB_DIR / f"{item_id}.jpg"
-        if not thumb_path.exists() or not thumb_path.stat().st_size:
+        if refresh_thumbnail or not thumb_path.exists() or not thumb_path.stat().st_size:
             full_image = image_to_rgb(opened)
-            thumb_path = make_thumbnail(full_image, item_id)
+            thumb_path = make_thumbnail(full_image, item_id, force=refresh_thumbnail)
 
     # Existing thumbnails are sufficient for color analysis and avoid repeatedly
     # decoding full-resolution originals when a library is refreshed.
@@ -434,6 +497,28 @@ class LibraryStore:
         self.path = path
         self.lock = threading.RLock()
         self.data = self._load()
+        if self._repair_relocated_paths():
+            self.save()
+
+    def _repair_relocated_paths(self) -> bool:
+        """Repair media paths after the project folder has been moved or renamed."""
+        changed = False
+        roots = {"downloads": ROOT / "downloads", "app_data": DATA_DIR}
+        for item in self.data.get("items", {}).values():
+            for key in ("path", "thumb_path"):
+                original = str(item.get(key) or "")
+                if not original or Path(original).is_file():
+                    continue
+                parts = Path(original).parts
+                for marker, root in roots.items():
+                    if marker not in parts:
+                        continue
+                    candidate = root.joinpath(*parts[parts.index(marker) + 1 :])
+                    if candidate.is_file():
+                        item[key] = str(candidate.resolve())
+                        changed = True
+                        break
+        return changed
 
     def _load(self) -> Dict[str, Any]:
         if self.path.exists():
@@ -487,6 +572,7 @@ class LibraryStore:
             item.setdefault("notes", "")
             item.setdefault("status", "unreviewed")
             item.setdefault("rating", 0)
+            item.setdefault("favorite", False)
             item.setdefault("tags", [])
             item.setdefault("folders", [])
             item.setdefault("shoot_assignments", {})
@@ -508,7 +594,7 @@ class LibraryStore:
             return source_key in self.source_index()
 
     def update(self, item_id: str, patch: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        allowed = {"title", "notes", "status", "rating", "tags", "folders"}
+        allowed = {"title", "notes", "status", "rating", "favorite", "tags", "folders"}
         with self.lock:
             item = self.data["items"].get(item_id)
             if not item:
@@ -525,6 +611,8 @@ class LibraryStore:
                         continue
                 if key == "status" and value not in {"unreviewed", "keep", "reject", "trash"}:
                     continue
+                if key == "favorite":
+                    value = bool(value)
                 item[key] = value
             item["updated_at"] = utc_now()
             self.save()
@@ -696,6 +784,14 @@ class LibraryStore:
             record["finished_at"] = utc_now()
             self.save()
 
+    def set_import_handle(self, import_id: str, handle: str) -> None:
+        with self.lock:
+            record = self.data.setdefault("imports", {}).get(import_id)
+            if not record:
+                return
+            record["handle"] = handle
+            self.save()
+
     def list_imports(self) -> List[Dict[str, Any]]:
         with self.lock:
             records = [dict(record) for record in self.data.setdefault("imports", {}).values()]
@@ -762,7 +858,10 @@ class LibraryStore:
         for item in items:
             if filter_name == "all" and item.get("status") == "reject":
                 continue
-            if filter_name != "all":
+            if filter_name == "favorites":
+                if item.get("status") == "reject" or not item.get("favorite"):
+                    continue
+            elif filter_name != "all":
                 if filter_name == "reviewed" and item.get("status") == "unreviewed":
                     continue
                 elif filter_name != "reviewed" and item.get("status") != filter_name:
@@ -788,7 +887,7 @@ class LibraryStore:
         with self.lock:
             items = list(self.data["items"].values())
         visible_items = [item for item in items if item.get("status") != "reject"]
-        counts = {"all": len(visible_items), "unreviewed": 0, "keep": 0, "reject": 0, "trash": 0, "reviewed": 0}
+        counts = {"all": len(visible_items), "favorites": 0, "unreviewed": 0, "keep": 0, "reject": 0, "trash": 0, "reviewed": 0}
         handles: Dict[str, int] = {}
         tags: Dict[str, int] = {}
         for item in items:
@@ -796,6 +895,8 @@ class LibraryStore:
             counts[status] = counts.get(status, 0) + 1
             if status == "reject":
                 continue
+            if item.get("favorite"):
+                counts["favorites"] += 1
             if status != "unreviewed":
                 counts["reviewed"] += 1
             handle = item.get("handle")
@@ -1098,6 +1199,9 @@ def start_instagram_job(payload: Dict[str, Any]) -> Dict[str, Any]:
         checkpoint_job(current)
         session = make_session(args, username)
         checkpoint_job(current)
+        source_name = Path(cookiefile).parent.name if cookiefile else browser
+        require_logged_in_session(session, source_name)
+        checkpoint_job(current)
         profile_data = profile_user(session, username)
         user_id = profile_data["id"]
         expected_posts = (profile_data.get("edge_owner_to_timeline_media") or {}).get("count") or 0
@@ -1150,6 +1254,7 @@ def start_instagram_job(payload: Dict[str, Any]) -> Dict[str, Any]:
                     )
                     path = image_dir / filename
                     download_image(session, image_url, path, post_url)
+                    normalize_import_image(path)
                     item_id = item_id_for(source_key)
                     analysis = analyze_file(path, item_id)
                     library_item = {
@@ -1184,6 +1289,76 @@ def start_instagram_job(payload: Dict[str, Any]) -> Dict[str, Any]:
             if not max_id:
                 break
             job_sleep(current, page_delay)
+
+    run_in_thread(job, work)
+    return job
+
+
+def start_instagram_post_job(payload: Dict[str, Any]) -> Dict[str, Any]:
+    post_url = str(payload.get("post_url") or payload.get("profile") or "").strip()
+    code = parse_post_code(post_url)
+    requested_handle = parse_username(str(payload.get("destination_handle") or ""))
+    record = STORE.create_import("instagram_post", requested_handle or code, post_url)
+    job = make_job("instagram_post", code)
+    job["import_id"] = record["id"]
+
+    def work(current: Dict[str, Any]) -> None:
+        checkpoint_job(current)
+        session = requests.Session()
+        session.headers.update({"User-Agent": "Mozilla/5.0", "Referer": post_url})
+        data = request_json(
+            session,
+            "https://www.instagram.com/api/v1/oembed/",
+            params={"url": post_url},
+        )
+        image_url = str(data.get("thumbnail_url") or "")
+        if not image_url:
+            raise RuntimeError("Instagram did not provide an image preview for that post.")
+        image_url = public_post_image_url(session, post_url, image_url)
+
+        owner_handle = parse_username(str(data.get("author_url") or ""))
+        target_handle = requested_handle or owner_handle or f"post-{code.lower()}"
+        STORE.set_import_handle(record["id"], target_handle)
+        image_dir = IMPORT_DIR / safe(target_handle, "instagram") / "originals"
+        image_dir.mkdir(parents=True, exist_ok=True)
+        update_job(current, total=1, message="Importing post")
+
+        source_key = f"instagram:{target_handle}:{code}:01"
+        existing_id = STORE.source_index().get(source_key)
+        existing = STORE.get(existing_id) if existing_id else None
+        filename = str(existing.get("filename") or "") if existing else ""
+        filename = filename or safe(f"post_{code}_01.jpg", f"{code}_01.jpg")
+        path = Path(str(existing.get("path") or "")) if existing else image_dir / filename
+        if not path.parent.exists():
+            path = image_dir / filename
+        download_image(session, image_url, path, post_url, force=True)
+        normalize_import_image(path)
+        item_id = item_id_for(source_key)
+        analysis = analyze_file(path, item_id, refresh_thumbnail=True)
+        library_item = {
+            "id": item_id,
+            "source_key": source_key,
+            "handle": target_handle,
+            "path": str(path.resolve()),
+            "filename": filename,
+            "title": str(data.get("title") or Path(filename).stem)[:160],
+            "source_url": post_url,
+            "post_code": code,
+            "media_index": 1,
+            "taken_date_utc": "",
+            "tags": [target_handle, "instagram"],
+            "folders": [target_handle],
+            "import_id": record["id"],
+            **analysis,
+        }
+        _stored, is_new = STORE.upsert(library_item)
+        update_job(
+            current,
+            created=current["created"] + (1 if is_new else 0),
+            updated=current["updated"] + (0 if is_new else 1),
+        )
+
+        update_job(current, done=1, message="Post imported")
 
     run_in_thread(job, work)
     return job
@@ -1288,6 +1463,14 @@ class StudioHandler(BaseHTTPRequestHandler):
                 return
             self.send_json({"job": job}, status=202)
             return
+        if parsed.path == "/api/import-instagram-post":
+            try:
+                job = start_instagram_post_job(self.read_json())
+            except RuntimeError as exc:
+                self.send_json({"error": str(exc)}, status=400)
+                return
+            self.send_json({"job": job}, status=202)
+            return
         self.send_json({"error": "Not found."}, status=404)
 
     def do_PATCH(self) -> None:
@@ -1369,6 +1552,8 @@ class StudioHandler(BaseHTTPRequestHandler):
             self.send_error(404)
             return
         path = Path(str(item.get(field) or ""))
+        if (not path.exists() or not path.is_file()) and field == "path":
+            path = Path(str(item.get("thumb_path") or ""))
         if not path.exists() or not path.is_file():
             self.send_error(404)
             return
