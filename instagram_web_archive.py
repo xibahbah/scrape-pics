@@ -91,7 +91,7 @@ def request_json(session: requests.Session, url: str, *, params: Optional[Dict[s
 
 
 def profile_user(session: requests.Session, username: str) -> Dict[str, Any]:
-    """Fetch a profile and translate Instagram's current schema outage into a useful local error."""
+    """Fetch profile data, with a search lookup fallback for Instagram schema outages."""
     try:
         payload = request_json(
             session,
@@ -102,11 +102,34 @@ def profile_user(session: requests.Session, username: str) -> Dict[str, Any]:
     except Exception as exc:  # noqa: BLE001 - preserves the exact API failure for non-schema cases.
         message = str(exc)
         if "ig_business_category_subvertical" in message:
-            raise RuntimeError(
-                f"Instagram is currently refusing @{username}'s profile data because its business category points to a deleted Instagram field. "
-                "Your browser login is working; try this profile again later or import a different profile."
-            ) from exc
+            try:
+                return profile_user_from_search(session, username)
+            except Exception as fallback_exc:  # noqa: BLE001 - retain both endpoint failures for the user.
+                raise RuntimeError(
+                    f"Instagram's profile metadata endpoint failed for @{username}, and Jade's alternate account lookup also failed: "
+                    f"{fallback_exc}"
+                ) from exc
         raise
+
+
+def profile_user_from_search(session: requests.Session, username: str) -> Dict[str, Any]:
+    """Resolve a public account ID through Instagram's web search endpoint.
+
+    Some profiles currently trigger a deleted optional-field error in
+    ``web_profile_info`` even though their feed remains available. Search gives
+    us the same account ID, which is all the feed importer needs.
+    """
+    payload = request_json(
+        session,
+        "https://www.instagram.com/web/search/topsearch/",
+        params={"query": username},
+    )
+    wanted = username.lower()
+    for entry in payload.get("users") or []:
+        user = entry.get("user") or {}
+        if str(user.get("username") or "").lower() == wanted and user.get("id"):
+            return user
+    raise RuntimeError(f"Instagram search could not find @{username}.")
 
 
 def best_image(media: Dict[str, Any]) -> Optional[Tuple[str, int, int]]:
@@ -215,7 +238,8 @@ def require_logged_in_session(session: requests.Session, source_name: str = "you
         allow_redirects=False,
     )
     location = str(response.headers.get("location") or "").lower()
-    if response.status_code in {301, 302, 303, 307, 308} and "/accounts/login" in location:
+    redirected_to_login = "/accounts/login" in location or location.rstrip("/") == "https://www.instagram.com"
+    if response.status_code in {301, 302, 303, 307, 308} and redirected_to_login:
         raise RuntimeError(
             f"Instagram login expired in {source_name}. Sign back into Instagram in that browser profile, "
             "then retry the import. The target account was not deleted."

@@ -497,8 +497,52 @@ class LibraryStore:
         self.path = path
         self.lock = threading.RLock()
         self.data = self._load()
-        if self._repair_relocated_paths():
+        changed = self._repair_relocated_paths()
+        changed = self._hydrate_legacy_import_resumes() or changed
+        changed = self._mark_interrupted_imports() or changed
+        if changed:
             self.save()
+
+    def _hydrate_legacy_import_resumes(self) -> bool:
+        """Let earlier profile imports opt into resume with conservative defaults."""
+        changed = False
+        for record in self.data.get("imports", {}).values():
+            if record.get("kind") != "instagram" or record.get("resume"):
+                continue
+            username = parse_username(str(record.get("handle") or record.get("source") or ""))
+            if not username:
+                continue
+            record["resume"] = {
+                "profile": str(record.get("source") or username),
+                "username": username,
+                "browser": "chrome",
+                "cookiefile": "",
+                "max_pages": None,
+                "count_per_page": 12,
+                "page_delay": 1.0,
+                "image_delay": 0.15,
+                "video_thumbnails": False,
+                "cursor": "",
+                "page": 0,
+                "user_id": "",
+                "completed": False,
+            }
+            record["updated_at"] = utc_now()
+            changed = True
+        return changed
+
+    def _mark_interrupted_imports(self) -> bool:
+        """Make imports that outlived a previous Jade process resumable."""
+        changed = False
+        for record in self.data.get("imports", {}).values():
+            if record.get("state") not in {"running", "paused", "cancelling"}:
+                continue
+            record["state"] = "interrupted"
+            record["error"] = "Jade closed before this import finished."
+            record["finished_at"] = utc_now()
+            record["updated_at"] = utc_now()
+            changed = True
+        return changed
 
     def _repair_relocated_paths(self) -> bool:
         """Repair media paths after the project folder has been moved or renamed."""
@@ -750,21 +794,30 @@ class LibraryStore:
                 current = current.parent
         return {"deleted": len(items), "files_deleted": files_deleted, "failed_files": failed_files}
 
-    def create_import(self, kind: str, handle: str, source: str) -> Dict[str, Any]:
+    def create_import(
+        self,
+        kind: str,
+        handle: str,
+        source: str,
+        resume: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
         import_id = uuid.uuid4().hex[:12]
+        now = utc_now()
         record = {
             "id": import_id,
             "kind": kind,
             "handle": handle,
             "source": source,
             "state": "running",
-            "created_at": utc_now(),
+            "created_at": now,
+            "updated_at": now,
             "finished_at": "",
             "created": 0,
             "updated": 0,
             "skipped": 0,
             "total": 0,
             "error": "",
+            "resume": dict(resume or {}),
         }
         with self.lock:
             self.data.setdefault("imports", {})[import_id] = record
@@ -782,7 +835,42 @@ class LibraryStore:
                 if key in job:
                     record[key] = job[key]
             record["finished_at"] = utc_now()
+            record["updated_at"] = utc_now()
             self.save()
+
+    def get_import(self, import_id: str) -> Optional[Dict[str, Any]]:
+        with self.lock:
+            record = self.data.setdefault("imports", {}).get(import_id)
+            return dict(record) if record else None
+
+    def checkpoint_import(self, import_id: str, job: Dict[str, Any], resume: Dict[str, Any]) -> None:
+        """Persist a completed pagination boundary so a retry is idempotent."""
+        if not import_id:
+            return
+        with self.lock:
+            record = self.data.setdefault("imports", {}).get(import_id)
+            if not record:
+                return
+            for key in ("created", "updated", "skipped", "total"):
+                if key in job:
+                    record[key] = job[key]
+            record["state"] = str(job.get("state") or "running")
+            record["error"] = ""
+            record["resume"] = dict(resume)
+            record["updated_at"] = utc_now()
+            self.save()
+
+    def restart_import(self, import_id: str) -> Optional[Dict[str, Any]]:
+        with self.lock:
+            record = self.data.setdefault("imports", {}).get(import_id)
+            if not record:
+                return None
+            record["state"] = "running"
+            record["error"] = ""
+            record["finished_at"] = ""
+            record["updated_at"] = utc_now()
+            self.save()
+            return dict(record)
 
     def set_import_handle(self, import_id: str, handle: str) -> None:
         with self.lock:
@@ -802,6 +890,11 @@ class LibraryStore:
                     asset_counts[import_id] = asset_counts.get(import_id, 0) + 1
         for record in records:
             record["asset_count"] = asset_counts.get(record["id"], 0)
+            record["can_resume"] = bool(
+                record.get("kind") == "instagram"
+                and record.get("resume")
+                and record.get("state") in {"error", "cancelled", "interrupted"}
+            )
         return sorted(records, key=lambda record: record.get("created_at", ""), reverse=True)
 
     def delete_import(self, import_id: str) -> Dict[str, int]:
@@ -1172,28 +1265,86 @@ def start_folder_job(path: Path, handle: str) -> Dict[str, Any]:
     return job
 
 
-def start_instagram_job(payload: Dict[str, Any]) -> Dict[str, Any]:
+def instagram_resume_options(payload: Dict[str, Any], username: str) -> Dict[str, Any]:
+    """Keep only the settings required to continue the same profile import."""
+    browser = str(payload.get("browser") or "chrome")
+    cookiefile = str(payload.get("cookiefile") or "").strip()
+    if not cookiefile and browser.lower() == "chrome":
+        cookiefile = str(guess_chrome_cookiefile() or "")
+    max_pages = payload.get("max_pages")
+    return {
+        "profile": str(payload.get("profile") or payload.get("handle") or username).strip(),
+        "username": username,
+        "browser": browser,
+        "cookiefile": cookiefile,
+        "max_pages": int(max_pages) if str(max_pages or "").strip() else None,
+        "count_per_page": max(1, int(payload.get("count_per_page") or 12)),
+        "page_delay": max(0.0, float(payload.get("page_delay") or 1.0)),
+        "image_delay": max(0.0, float(payload.get("image_delay") or 0.15)),
+        "video_thumbnails": bool(payload.get("video_thumbnails")),
+        "cursor": "",
+        "page": 0,
+        "user_id": "",
+        "completed": False,
+    }
+
+
+def import_is_active(import_id: str) -> bool:
+    with JOBS_LOCK:
+        return any(
+            str(job.get("import_id") or "") == import_id
+            and job.get("state") not in {"done", "error", "cancelled"}
+            for job in JOBS.values()
+        )
+
+
+def start_instagram_job(payload: Dict[str, Any], existing_record: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     profile = str(payload.get("profile") or payload.get("handle") or "").strip()
     username = parse_username(profile)
     if not username:
         raise RuntimeError("Instagram handle is required.")
 
-    record = STORE.create_import("instagram", username, profile)
+    if existing_record:
+        record = existing_record
+        if import_is_active(str(record.get("id") or "")):
+            raise RuntimeError("This import is already running.")
+        resume = dict(record.get("resume") or {})
+        if not resume:
+            raise RuntimeError("This older import does not have enough progress data to resume.")
+        resume["profile"] = str(resume.get("profile") or profile)
+        resume["username"] = username
+        record = STORE.restart_import(str(record["id"])) or record
+    else:
+        resume = instagram_resume_options(payload, username)
+        record = STORE.create_import("instagram", username, profile, resume=resume)
+
     job = make_job("instagram", username)
     job["import_id"] = record["id"]
+    update_job(
+        job,
+        done=int(record.get("done") or 0),
+        total=int(record.get("total") or 0),
+        created=int(record.get("created") or 0),
+        updated=int(record.get("updated") or 0),
+        skipped=int(record.get("skipped") or 0),
+        message="Resuming" if existing_record else "Preparing import",
+    )
+
+    def save_checkpoint(current: Dict[str, Any]) -> None:
+        STORE.checkpoint_import(record["id"], current, resume)
 
     def work(current: Dict[str, Any]) -> None:
-        browser = str(payload.get("browser") or "chrome")
-        cookiefile = str(payload.get("cookiefile") or "").strip() or None
+        browser = str(resume.get("browser") or "chrome")
+        cookiefile = str(resume.get("cookiefile") or "").strip() or None
         if not cookiefile and browser.lower() == "chrome":
             cookiefile = guess_chrome_cookiefile()
-
-        max_pages = payload.get("max_pages")
-        max_pages = int(max_pages) if str(max_pages or "").strip() else None
-        count_per_page = max(1, int(payload.get("count_per_page") or 12))
-        page_delay = max(0.0, float(payload.get("page_delay") or 1.0))
-        image_delay = max(0.0, float(payload.get("image_delay") or 0.15))
-        video_thumbnails = bool(payload.get("video_thumbnails"))
+            resume["cookiefile"] = str(cookiefile or "")
+        max_pages = resume.get("max_pages")
+        max_pages = int(max_pages) if max_pages is not None else None
+        count_per_page = max(1, int(resume.get("count_per_page") or 12))
+        page_delay = max(0.0, float(resume.get("page_delay") or 1.0))
+        image_delay = max(0.0, float(resume.get("image_delay") or 0.15))
+        video_thumbnails = bool(resume.get("video_thumbnails"))
 
         args = argparse.Namespace(browser=browser, cookiefile=cookiefile)
         checkpoint_job(current)
@@ -1202,15 +1353,22 @@ def start_instagram_job(payload: Dict[str, Any]) -> Dict[str, Any]:
         source_name = Path(cookiefile).parent.name if cookiefile else browser
         require_logged_in_session(session, source_name)
         checkpoint_job(current)
-        profile_data = profile_user(session, username)
-        user_id = profile_data["id"]
-        expected_posts = (profile_data.get("edge_owner_to_timeline_media") or {}).get("count") or 0
-        update_job(current, total=expected_posts, message="Importing")
+
+        user_id = str(resume.get("user_id") or "")
+        if user_id:
+            expected_posts = int(record.get("total") or 0)
+        else:
+            profile_data = profile_user(session, username)
+            user_id = str(profile_data["id"])
+            expected_posts = (profile_data.get("edge_owner_to_timeline_media") or {}).get("count") or 0
+        resume["user_id"] = user_id
+        update_job(current, total=max(int(current.get("total") or 0), int(expected_posts or 0)), message="Importing")
+        save_checkpoint(current)
 
         image_dir = IMPORT_DIR / username / "originals"
         image_dir.mkdir(parents=True, exist_ok=True)
-        max_id: Optional[str] = None
-        page = 0
+        max_id = str(resume.get("cursor") or "") or None
+        page = int(resume.get("page") or 0)
         seen_post_ids = set()
 
         while True:
@@ -1283,15 +1441,32 @@ def start_instagram_job(payload: Dict[str, Any]) -> Dict[str, Any]:
 
                 update_job(current, done=current["done"] + 1, message=f"Page {page}")
 
-            if not data.get("more_available"):
+            next_cursor = str(data.get("next_max_id") or "")
+            resume.update({"cursor": next_cursor, "page": page})
+            save_checkpoint(current)
+            if not data.get("more_available") or not next_cursor:
+                resume["completed"] = True
+                save_checkpoint(current)
                 break
-            max_id = data.get("next_max_id")
-            if not max_id:
-                break
+            max_id = next_cursor
             job_sleep(current, page_delay)
 
     run_in_thread(job, work)
     return job
+
+
+def resume_instagram_import(import_id: str) -> Dict[str, Any]:
+    record = STORE.get_import(import_id)
+    if not record:
+        raise RuntimeError("Import not found.")
+    if record.get("kind") != "instagram":
+        raise RuntimeError("Only profile imports can be resumed.")
+    if record.get("state") not in {"error", "cancelled", "interrupted"}:
+        raise RuntimeError("This import is not waiting to be resumed.")
+    resume = dict(record.get("resume") or {})
+    if resume.get("completed"):
+        raise RuntimeError("This import already completed.")
+    return start_instagram_job(resume, existing_record=record)
 
 
 def start_instagram_post_job(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -1466,6 +1641,15 @@ class StudioHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/import-instagram-post":
             try:
                 job = start_instagram_post_job(self.read_json())
+            except RuntimeError as exc:
+                self.send_json({"error": str(exc)}, status=400)
+                return
+            self.send_json({"job": job}, status=202)
+            return
+        if parsed.path.startswith("/api/imports/") and parsed.path.endswith("/resume"):
+            import_id = parsed.path.removeprefix("/api/imports/").removesuffix("/resume").strip("/")
+            try:
+                job = resume_instagram_import(import_id)
             except RuntimeError as exc:
                 self.send_json({"error": str(exc)}, status=400)
                 return

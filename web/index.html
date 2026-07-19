@@ -11,15 +11,13 @@
   <body>
     <div class="shell">
       <aside class="sidebar" aria-label="Library">
+        <button class="icon-button sidebar-toggle" id="sidebarToggle" title="Collapse sidebar" aria-label="Collapse sidebar"><i data-lucide="panel-left-close"></i></button>
         <nav class="nav-block" id="statusNav">
           <button class="nav-item active" data-filter="all">
             <i data-lucide="images"></i><span>All pictures</span><strong data-count="all">0</strong>
           </button>
           <button class="nav-item" data-filter="favorites">
             <i data-lucide="star"></i><span>Favorites</span><strong data-count="favorites">0</strong>
-          </button>
-          <button class="nav-item" id="cullMode">
-            <i data-lucide="list-checks"></i><span>Review</span>
           </button>
         </nav>
 
@@ -64,14 +62,16 @@
             <button class="library-filter-button randomize-button" id="randomizeLibrary" title="Shuffle this collection">
               <i data-lucide="shuffle"></i><span>Randomize</span>
             </button>
-            <label class="rating-sort" title="Sort by rating">
-              <i data-lucide="arrow-up-down"></i>
-              <select id="ratingSort">
-                <option value="">Sort rating</option>
-                <option value="high">Highest first</option>
-                <option value="low">Lowest first</option>
-              </select>
-            </label>
+            <div class="rating-sort-menu">
+              <button class="library-filter-button" id="ratingSortButton" title="Sort by rating" aria-expanded="false">
+                <i data-lucide="arrow-up-down"></i><span id="ratingSortLabel">Sort rating</span><i data-lucide="chevron-down"></i>
+              </button>
+              <div class="sort-popover" id="ratingSortPopover" hidden>
+                <button type="button" class="sort-option" data-rating-sort="">Sort rating</button>
+                <button type="button" class="sort-option" data-rating-sort="high">Highest first</button>
+                <button type="button" class="sort-option" data-rating-sort="low">Lowest first</button>
+              </div>
+            </div>
           </div>
         </header>
 
@@ -95,6 +95,7 @@
                 <option value="reject">Reject</option>
               </select>
             </label>
+            <button class="icon-button" id="focusMenu" title="Image actions"><i data-lucide="ellipsis"></i></button>
             <button class="icon-button" id="focusPrevious" title="Previous image"><i data-lucide="chevron-left"></i></button>
             <button class="icon-button" id="focusNext" title="Next image"><i data-lucide="chevron-right"></i></button>
           </div>
@@ -257,7 +258,7 @@
         <p class="dialog-copy" id="deleteHandleCopy"></p>
         <div class="dialog-actions">
           <button class="secondary-button" type="button" id="cancelDeleteHandleSecondary">Cancel</button>
-          <button class="danger-button" type="submit"><i data-lucide="trash-2"></i><span>Delete locally</span></button>
+          <button class="danger-button" type="submit"><span>Delete locally</span></button>
         </div>
       </form>
     </dialog>
@@ -288,7 +289,7 @@
         <p class="dialog-copy" id="deleteShootCopy"></p>
         <div class="dialog-actions">
           <button class="secondary-button" type="button" id="cancelDeleteShootSecondary">Cancel</button>
-          <button class="danger-button" type="submit"><i data-lucide="trash-2"></i><span>Delete board</span></button>
+          <button class="danger-button" type="submit"><span>Delete board</span></button>
         </div>
       </form>
     </dialog>
@@ -301,7 +302,8 @@
         </div>
         <div class="import-history-list" id="importHistoryList"></div>
         <div class="dialog-actions">
-          <button class="danger-button" type="button" id="deleteImportBatch" disabled><i data-lucide="trash-2"></i><span>Delete selected</span></button>
+          <button class="secondary-button" type="button" id="resumeImportBatch" hidden>Resume import</button>
+          <button class="danger-button" type="button" id="deleteImportBatch" disabled><span>Delete selected</span></button>
         </div>
       </form>
     </dialog>
@@ -315,7 +317,7 @@
         <p class="dialog-copy" id="deleteImportCopy"></p>
         <div class="dialog-actions">
           <button class="secondary-button" type="button" id="cancelDeleteImportSecondary">Cancel</button>
-          <button class="danger-button" type="submit"><i data-lucide="trash-2"></i><span>Delete locally</span></button>
+          <button class="danger-button" type="submit"><span>Delete locally</span></button>
         </div>
       </form>
     </dialog>

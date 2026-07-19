@@ -1,11 +1,11 @@
 :root {
   color-scheme: dark;
-  --bg: #181918;
-  --panel: #1d1e1d;
-  --panel-soft: #272826;
-  --panel-raised: #30312f;
-  --line: #363835;
-  --line-bright: #6f9e81;
+  --bg: #171a18;
+  --panel: #1b1f1c;
+  --panel-soft: #272c28;
+  --panel-raised: #303731;
+  --line: #363d37;
+  --line-bright: #668f74;
   --text: #f1f1ed;
   --muted: #a6a7a2;
   --muted-2: #777a74;
@@ -15,7 +15,7 @@
   --cyan: #55b7c9;
   --thumb-size: 178px;
   font-family:
-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", Arial, sans-serif;
 }
 
 * {
@@ -83,6 +83,44 @@ button {
   overflow: hidden;
 }
 
+.sidebar-toggle {
+  width: 28px;
+  height: 28px;
+  align-self: flex-end;
+  display: grid;
+  place-items: center;
+  border-radius: 5px;
+  color: var(--muted);
+}
+
+.sidebar-toggle:hover {
+  background: var(--panel-soft);
+  color: var(--text);
+}
+
+.shell.sidebar-collapsed {
+  grid-template-columns: 44px 0 minmax(0, 1fr) 3px var(--inspector-width, 300px);
+}
+
+.shell.sidebar-collapsed .sidebar {
+  padding: 10px 8px;
+}
+
+.shell.sidebar-collapsed .sidebar > :not(.sidebar-toggle) {
+  display: none;
+}
+
+.shell.sidebar-collapsed .sidebar-toggle {
+  align-self: center;
+}
+
+.shell.sidebar-collapsed #sidebarResize {
+  /* Keep this grid cell occupied. Removing it reflows the workspace into
+     the collapsed zero-width divider column at compact Retina widths. */
+  visibility: hidden;
+  pointer-events: none;
+}
+
 .inspector {
   border-left: 1px solid var(--line);
   overflow: auto;
@@ -95,7 +133,7 @@ button {
   min-height: 0;
   display: flex;
   flex-direction: column;
-  background: #191a19;
+  background: #181c19;
 }
 
 .side-label,
@@ -344,7 +382,7 @@ button {
   gap: 12px;
   padding: 0 20px;
   border-bottom: 1px solid var(--line);
-  background: #20211f;
+  background: #1d221e;
 }
 
 .library-filter-actions {
@@ -359,8 +397,7 @@ button {
   gap: 6px;
 }
 
-.library-filter-button,
-.rating-sort {
+.library-filter-button {
   height: 32px;
   display: inline-flex;
   align-items: center;
@@ -376,27 +413,59 @@ button {
 }
 
 .library-filter-button:hover,
-.library-filter-button.active,
-.rating-sort:focus-within {
+.library-filter-button.active {
   border-color: var(--line);
   background: var(--panel-soft);
   color: #fff;
 }
 
-.library-filter-button svg,
-.rating-sort svg {
+.library-filter-button svg {
   width: 16px;
   height: 16px;
 }
 
-.rating-sort select {
-  min-width: 92px;
+.rating-sort-menu {
+  position: relative;
+}
+
+#ratingSortButton svg:last-child {
+  width: 14px;
+  height: 14px;
+  margin-left: -2px;
+}
+
+.sort-popover {
+  position: absolute;
+  z-index: 30;
+  top: calc(100% + 7px);
+  right: 0;
+  width: 156px;
+  padding: 5px;
+  border: 1px solid #41443f;
+  border-radius: 7px;
+  background: #252623;
+  box-shadow: 0 14px 34px rgba(0, 0, 0, 0.34);
+}
+
+.sort-option {
+  width: 100%;
+  min-height: 30px;
   border: 0;
-  outline: 0;
+  border-radius: 5px;
+  padding: 0 9px;
   background: transparent;
-  color: inherit;
+  color: var(--muted);
+  font: inherit;
   font-size: 12px;
-  font-weight: 750;
+  font-weight: 650;
+  text-align: left;
+  cursor: pointer;
+}
+
+.sort-option:hover,
+.sort-option.active {
+  background: #30322e;
+  color: var(--text);
 }
 
 .workspace.focusing .toolbar,
@@ -626,7 +695,7 @@ button {
 .job-strip {
   display: none;
   border-bottom: 1px solid var(--line);
-  background: #21221f;
+  background: #1d231f;
   color: var(--muted);
   font-size: 13px;
 }
@@ -636,21 +705,76 @@ button {
 }
 
 .job-notice {
-  min-height: 40px;
+  min-height: 56px;
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 7px 14px 7px 20px;
+  padding: 8px 14px 8px 20px;
 }
 
 .job-notice + .job-notice {
   border-top: 1px solid var(--line);
 }
 
-.job-notice > span {
+.job-main {
   min-width: 0;
   flex: 1;
-  line-height: 1.35;
+  display: grid;
+  gap: 5px;
+}
+
+.job-line {
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.job-line strong,
+.job-line span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.job-line strong {
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.job-line span,
+.job-main small {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.job-progress {
+  height: 3px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #343633;
+}
+
+.job-progress span {
+  display: block;
+  width: 0;
+  height: 100%;
+  border-radius: inherit;
+  background: #6f9e81;
+  transition: width 240ms ease;
+}
+
+.job-progress.indeterminate span {
+  width: 34%;
+  animation: import-progress 1.25s ease-in-out infinite;
+}
+
+@keyframes import-progress {
+  0% { transform: translateX(-110%); }
+  100% { transform: translateX(330%); }
 }
 
 .job-actions {
@@ -886,14 +1010,19 @@ button {
   width: 100%;
   min-height: 0;
   overflow: auto;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 24px;
+  position: relative;
+  padding: 0;
   cursor: grab;
   touch-action: none;
   overscroll-behavior: contain;
   user-select: none;
+}
+
+.focus-canvas {
+  display: grid;
+  place-items: center;
+  min-width: 100%;
+  min-height: 100%;
 }
 
 .focus-stage img {
@@ -1162,6 +1291,43 @@ button {
   flex-basis: 22px;
 }
 
+.inspector-quick-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin: -8px 0 8px;
+}
+
+.favorite-button {
+  width: 32px;
+  height: 32px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 5px;
+  padding: 0;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.favorite-button:hover {
+  background: var(--panel-soft);
+  color: #ebece6;
+}
+
+.favorite-button.active {
+  color: #d7bd67;
+}
+
+.favorite-button.active svg {
+  fill: currentColor;
+}
+
+.favorite-button svg {
+  width: 19px;
+  height: 19px;
+}
+
 .tone-palette {
   display: grid;
   gap: 8px;
@@ -1226,6 +1392,14 @@ button {
   height: 42px;
   padding: 0 12px;
   margin-bottom: 10px;
+}
+
+.inspector-source-fields {
+  display: grid;
+  gap: 0;
+  margin-top: 18px;
+  padding-top: 16px;
+  border-top: 1px solid var(--line);
 }
 
 .notes-input {
@@ -1699,17 +1873,17 @@ button {
 .dialog-panel {
   width: min(560px, calc(100vw - 32px));
   border-radius: 8px;
-  border: 1px solid #3b3d38;
-  background: #20211f;
-  padding: 18px;
+  border: 1px solid #3b423b;
+  background: #1d221f;
+  padding: 20px;
   display: grid;
   gap: 16px;
   box-shadow: 0 24px 72px rgba(0, 0, 0, 0.42);
 }
 
 .compact-dialog {
-  width: min(360px, calc(100vw - 32px));
-  gap: 12px;
+  width: min(400px, calc(100vw - 32px));
+  gap: 14px;
 }
 
 .image-dialog {
@@ -1766,7 +1940,7 @@ button {
 
 .asset-menu {
   position: fixed;
-  z-index: 20;
+  z-index: 100;
   width: 224px;
   border: 1px solid #454743;
   border-radius: 8px;
@@ -1861,8 +2035,8 @@ button {
 
 .dialog-head h2 {
   margin: 0;
-  font-size: 16px;
-  font-weight: 700;
+  font-size: 17px;
+  font-weight: 650;
 }
 
 .dialog-head .icon-button {
@@ -1879,27 +2053,27 @@ button {
 
 .dialog-head .icon-button:focus-visible {
   outline: none;
-  background: #30312e;
-  color: var(--line-bright);
+  box-shadow: none;
+  background: transparent;
+  color: var(--text);
 }
 
 .dialog-copy {
   margin: 0;
   color: #b6b8b1;
-  font-size: 12px;
-  line-height: 1.45;
+  font-size: 13px;
+  line-height: 1.5;
 }
 
 .danger-button {
-  border: 1px solid #704641;
-  background: rgba(122, 66, 59, 0.26);
-  color: #e9bbb4;
+  border: 0;
+  background: transparent;
+  color: #df847b;
 }
 
 .danger-button:hover {
-  border-color: #9b554c;
-  background: rgba(145, 70, 62, 0.52);
-  color: #fff8f5;
+  background: transparent;
+  color: #ffa49a;
 }
 
 .compact-dialog .dialog-actions {
@@ -1929,14 +2103,14 @@ button {
 
 .compact-dialog .danger-button {
   border-color: transparent;
-  background: #5b3934;
-  color: #fae2de;
+  background: transparent;
+  color: #df847b;
 }
 
 .compact-dialog .danger-button:hover {
   border-color: transparent;
-  background: #75423b;
-  color: #fff8f5;
+  background: transparent;
+  color: #ffa49a;
 }
 
 .import-history-dialog {
@@ -2130,6 +2304,10 @@ button {
 @media (max-width: 1100px) {
   .shell {
     grid-template-columns: var(--sidebar-width, 210px) 6px minmax(0, 1fr);
+  }
+
+  .shell.sidebar-collapsed {
+    grid-template-columns: 44px 0 minmax(0, 1fr);
   }
 
   #inspectorResize {

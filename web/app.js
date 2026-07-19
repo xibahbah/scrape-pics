@@ -34,12 +34,14 @@ const state = {
   selectedImportId: "",
   deletingImportId: "",
   dismissedJobIds: new Set(),
+  jobStates: new Map(),
   contextShootId: "",
   renamingShootId: "",
   deletingShootId: "",
   randomized: false,
   randomOrder: [],
   importMode: "profile",
+  sidebarCollapsed: false,
 };
 
 const $ = (selector, root = document) => root.querySelector(selector);
@@ -53,6 +55,17 @@ function iconRefresh() {
   if (window.lucide) {
     window.lucide.createIcons();
   }
+}
+
+function setSidebarCollapsed(collapsed) {
+  state.sidebarCollapsed = Boolean(collapsed);
+  $(".shell").classList.toggle("sidebar-collapsed", state.sidebarCollapsed);
+  const toggle = $("#sidebarToggle");
+  toggle.title = state.sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar";
+  toggle.setAttribute("aria-label", toggle.title);
+  toggle.innerHTML = `<i data-lucide="${state.sidebarCollapsed ? "panel-left-open" : "panel-left-close"}"></i>`;
+  localStorage.setItem("jade.sidebar-collapsed", String(state.sidebarCollapsed));
+  iconRefresh();
 }
 
 function escapeHtml(value = "") {
@@ -131,11 +144,21 @@ async function loadShoots() {
 
 async function loadJobs() {
   const data = await api("/api/jobs");
-  state.jobs = data.jobs || [];
+  const jobs = data.jobs || [];
+  const completedImports = jobs.filter((job) => state.jobStates.get(job.id) && state.jobStates.get(job.id) !== "done" && job.state === "done");
+  state.jobs = jobs;
+  state.jobStates = new Map(jobs.map((job) => [job.id, job.state]));
   renderJobs();
-  if (state.jobs.some((job) => job.state === "running")) {
+  if (completedImports.some((job) => (job.created || 0) + (job.updated || 0) > 0)) {
     loadLibrary({ keepSelection: true }).catch(console.error);
   }
+}
+
+function rememberJob(job) {
+  if (!job?.id) return;
+  state.jobStates.set(job.id, job.state);
+  state.jobs = [job, ...state.jobs.filter((existing) => existing.id !== job.id)];
+  renderJobs();
 }
 
 function importLabel(record) {
@@ -149,11 +172,22 @@ function formatImportDate(value) {
   return date.toLocaleString([], { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" });
 }
 
+function importStateLabel(record) {
+  if (record.state === "running") return "Importing";
+  if (record.state === "paused") return "Paused";
+  if (record.can_resume) return "Interrupted - resume available";
+  if (record.state === "error") return "Import failed";
+  if (record.state === "cancelled") return "Stopped";
+  return `${record.asset_count || 0} added`;
+}
+
 function renderImportHistory() {
   const list = $("#importHistoryList");
   const selected = state.imports.find((record) => record.id === state.selectedImportId);
   $("#deleteImportBatch").hidden = !selected;
   $("#deleteImportBatch").disabled = !selected;
+  $("#resumeImportBatch").hidden = !selected?.can_resume;
+  $("#resumeImportBatch").disabled = !selected?.can_resume;
   if (!state.imports.length) {
     list.innerHTML = `<div class="history-empty">No imports yet</div>`;
     return;
@@ -161,7 +195,7 @@ function renderImportHistory() {
   list.innerHTML = state.imports
     .map((record) => {
       const active = record.id === state.selectedImportId;
-      const stateLabel = record.state === "error" ? "Import failed" : record.state === "running" ? "Importing" : `${record.asset_count || 0} added`;
+      const stateLabel = importStateLabel(record);
       return `<button class="import-history-row ${active ? "selected" : ""}" type="button" data-import-history="${escapeHtml(record.id)}" aria-pressed="${active}">
         <span class="import-history-icon"><i data-lucide="${record.kind === "instagram" ? "instagram" : "folder-search"}"></i></span>
         <span class="import-history-main"><strong>${escapeHtml(importLabel(record))}</strong><small>${escapeHtml(formatImportDate(record.created_at))} - ${escapeHtml(stateLabel)}</small></span>
@@ -205,6 +239,15 @@ async function deleteImportBatch() {
   if (result.failed_files) alert(`${result.failed_files} file${result.failed_files === 1 ? "" : "s"} could not be deleted.`);
 }
 
+async function resumeImportBatch() {
+  const record = state.imports.find((entry) => entry.id === state.selectedImportId);
+  if (!record?.can_resume) return;
+  const result = await api(`/api/imports/${encodeURIComponent(record.id)}/resume`, { method: "POST" });
+  rememberJob(result.job);
+  state.selectedImportId = "";
+  $("#importHistoryDialog").close();
+}
+
 function render() {
   renderSidebar();
   renderMode();
@@ -232,7 +275,6 @@ function renderSidebar() {
   $$("#statusNav .nav-item").forEach((button) => {
     button.classList.toggle("active", button.dataset.filter === state.filter && !state.randomized);
   });
-  $("#cullMode").classList.toggle("active", state.view === "review");
   $("#reviewToggle").classList.toggle("active", state.view === "review");
 
   const handles = state.stats.handles || [];
@@ -371,12 +413,16 @@ function renderColorFilters() {
   $("#colorFilterToggle").classList.toggle("active", Boolean(state.colorFilter));
   $("#ratingFilterToggle").classList.toggle("active", Boolean(state.ratingFilter));
   $("#ratingFilter").value = state.ratingFilter;
-  $("#ratingSort").value = state.ratingSort;
+  const ratingSortLabel = { "": "Sort rating", high: "Highest first", low: "Lowest first" };
+  $("#ratingSortLabel").textContent = ratingSortLabel[state.ratingSort] || "Sort rating";
+  $$('[data-rating-sort]').forEach((button) => button.classList.toggle("active", button.dataset.ratingSort === state.ratingSort));
 }
 
 function closeFilterPopovers() {
   $("#colorPopover").hidden = true;
   $("#ratingPopover").hidden = true;
+  $("#ratingSortPopover").hidden = true;
+  $("#ratingSortButton").setAttribute("aria-expanded", "false");
 }
 
 function toggleFilterPopover(name) {
@@ -474,7 +520,7 @@ function shootControls(item) {
 function removeFromShootControl(item) {
   if (!state.shootViewId || !(item.shoot_assignments || {})[state.shootViewId]) return "";
   return `<button class="remove-shoot-button" data-remove-from-shoot title="Remove from this board only">
-    <i data-lucide="trash-2"></i><span>Remove from Board</span>
+    <span>Remove from Board</span>
   </button>`;
 }
 
@@ -502,15 +548,16 @@ function renderInspector() {
     </div>
     ${swatches(item.colors)}
     ${toneBands(item.tone_colors)}
-    <input class="name-input" id="titleInput" value="${escapeHtml(item.title || "")}" />
-    <textarea class="notes-input" id="notesInput" placeholder="Notes...">${escapeHtml(item.notes || "")}</textarea>
-    <input class="url-input" value="${escapeHtml(item.source_url || "")}" readonly />
+    <div class="inspector-quick-actions"><button class="favorite-button ${item.favorite ? "active" : ""}" type="button" data-inspector-favorite aria-pressed="${Boolean(item.favorite)}" aria-label="${item.favorite ? "Remove from favorites" : "Add to favorites"}" title="${item.favorite ? "Remove from favorites" : "Add to favorites"}">
+      <i data-lucide="star"></i>
+    </button></div>
+    ${shootControls(item)}
+    ${removeFromShootControl(item)}
     <div class="detail-section rating-section">
       <div class="detail-title">Rating</div>
       ${ratingStars(item.rating || 0)}
     </div>
-    ${shootControls(item)}
-    ${removeFromShootControl(item)}
+    <textarea class="notes-input" id="notesInput" placeholder="Notes...">${escapeHtml(item.notes || "")}</textarea>
     <div class="detail-section">
       <div class="detail-title">Tags</div>
       <div class="tag-row">${(item.tags || []).map((tag) => `<span class="tag">${escapeHtml(tag)}</span>`).join("")}</div>
@@ -524,6 +571,10 @@ function renderInspector() {
         <div class="meta-row"><dt>Photographer</dt><dd>${escapeHtml(item.handle || "")}</dd></div>
         <div class="meta-row"><dt>Post</dt><dd>${escapeHtml(item.post_code || "")}</dd></div>
       </dl>
+    </div>
+    <div class="inspector-source-fields">
+      <input class="name-input" id="titleInput" value="${escapeHtml(item.title || "")}" aria-label="Image name" />
+      <input class="url-input" value="${escapeHtml(item.source_url || "")}" aria-label="Instagram link" readonly />
     </div>`;
 }
 
@@ -575,15 +626,20 @@ function focusItems() {
 
 function applyFocusZoom() {
   const stage = $("#focusStage");
+  const canvas = $("#focusCanvas");
   const image = $("#focusImage");
-  if (!stage || !image?.naturalWidth || !image?.naturalHeight) return;
+  if (!stage || !canvas || !image?.naturalWidth || !image?.naturalHeight) return;
   const fit = Math.min(
-    (stage.clientWidth - 48) / image.naturalWidth,
-    (stage.clientHeight - 48) / image.naturalHeight,
+    stage.clientWidth / image.naturalWidth,
+    stage.clientHeight / image.naturalHeight,
     1,
   );
-  image.style.width = `${Math.max(1, image.naturalWidth * fit * state.focusZoom)}px`;
-  image.style.height = `${Math.max(1, image.naturalHeight * fit * state.focusZoom)}px`;
+  const imageWidth = Math.max(1, image.naturalWidth * fit * state.focusZoom);
+  const imageHeight = Math.max(1, image.naturalHeight * fit * state.focusZoom);
+  image.style.width = `${imageWidth}px`;
+  image.style.height = `${imageHeight}px`;
+  canvas.style.width = `${Math.max(stage.clientWidth, imageWidth)}px`;
+  canvas.style.height = `${Math.max(stage.clientHeight, imageHeight)}px`;
 }
 
 function setFocusZoom(zoom, clientX = null, clientY = null) {
@@ -592,17 +648,27 @@ function setFocusZoom(zoom, clientX = null, clientY = null) {
   const nextZoom = Math.max(0.2, Math.min(3, zoom));
   if (Math.abs(nextZoom - previousZoom) < 0.001) return;
 
-  // Keep the point beneath the cursor in place while a trackpad pinch changes scale.
+  let zoomAnchor = null;
   if (stage && clientX !== null && clientY !== null) {
     const rect = stage.getBoundingClientRect();
-    const scale = nextZoom / previousZoom;
-    stage.scrollLeft = (stage.scrollLeft + clientX - rect.left) * scale - (clientX - rect.left);
-    stage.scrollTop = (stage.scrollTop + clientY - rect.top) * scale - (clientY - rect.top);
+    zoomAnchor = {
+      x: clientX - rect.left,
+      y: clientY - rect.top,
+      left: stage.scrollLeft,
+      top: stage.scrollTop,
+      scale: nextZoom / previousZoom,
+    };
   }
   state.focusZoom = nextZoom;
   $("#focusZoomInput").value = String(Math.round(nextZoom * 100));
   $("#focusZoomValue").textContent = `${Math.round(nextZoom * 100)}%`;
   applyFocusZoom();
+  if (zoomAnchor && stage) {
+    requestAnimationFrame(() => {
+      stage.scrollLeft = (zoomAnchor.left + zoomAnchor.x) * zoomAnchor.scale - zoomAnchor.x;
+      stage.scrollTop = (zoomAnchor.top + zoomAnchor.y) * zoomAnchor.scale - zoomAnchor.y;
+    });
+  }
 }
 
 function beginFocusDrag(event) {
@@ -675,6 +741,14 @@ function renderFocus() {
   const currentIndex = items.findIndex((item) => item.id === state.focusId);
   const item = currentIndex >= 0 ? items[currentIndex] : null;
   if (!state.focusId || !item) {
+    // A filter, board change, or deleted assignment can invalidate a focused
+    // asset. Return to the grid instead of leaving the workspace blank.
+    if (state.focusId) {
+      state.focusId = "";
+      state.focusZoom = 1;
+      state.focusDrag = null;
+      renderMode();
+    }
     focusView.innerHTML = "";
     return;
   }
@@ -684,7 +758,7 @@ function renderFocus() {
   $("#focusDecision").value = item.status || "unreviewed";
   $("#focusPrevious").disabled = currentIndex <= 0;
   $("#focusNext").disabled = currentIndex >= items.length - 1;
-  focusView.innerHTML = `<div class="focus-stage" id="focusStage"><img id="focusImage" src="${escapeHtml(item.media_url)}" alt="${escapeHtml(item.title || item.filename)}" /></div>`;
+  focusView.innerHTML = `<div class="focus-stage" id="focusStage"><div class="focus-canvas" id="focusCanvas"><img id="focusImage" src="${escapeHtml(item.media_url)}" alt="${escapeHtml(item.title || item.filename)}" /></div></div>`;
   const image = $("#focusImage");
   image.addEventListener("load", applyFocusZoom, { once: true });
   if (image.complete) requestAnimationFrame(applyFocusZoom);
@@ -703,17 +777,46 @@ function renderJobs() {
   strip.classList.add("active");
   strip.innerHTML = activeJobs
     .map((job) => {
-      const total = job.total ? `/${job.total}` : "";
       const tail = job.state === "error" ? `Error: ${job.error}` : job.message || job.kind;
+      const total = Number(job.total || 0);
+      const done = Number(job.done || 0);
+      const ratio = total ? Math.min(1, done / total) : 0;
+      const timing = jobTiming(job);
       const controls = job.state === "running"
         ? `<button class="job-control" data-job-action="pause" data-job-id="${escapeHtml(job.id)}" title="Pause import"><i data-lucide="pause"></i></button><button class="job-control danger" data-job-action="cancel" data-job-id="${escapeHtml(job.id)}" title="Cancel import"><i data-lucide="x"></i></button>`
         : job.state === "paused"
           ? `<button class="job-control" data-job-action="resume" data-job-id="${escapeHtml(job.id)}" title="Resume import"><i data-lucide="play"></i></button><button class="job-control danger" data-job-action="cancel" data-job-id="${escapeHtml(job.id)}" title="Cancel import"><i data-lucide="x"></i></button>`
           : "";
-      return `<div class="job-notice"><span>${escapeHtml(`${job.target}: ${job.done}${total} ${tail}`)}</span><div class="job-actions">${controls}<button class="job-dismiss" data-dismiss-job="${escapeHtml(job.id)}" title="Dismiss"><i data-lucide="x"></i></button></div></div>`;
+      const progress = total
+        ? `<div class="job-progress" role="progressbar" aria-valuemin="0" aria-valuemax="${total}" aria-valuenow="${Math.min(done, total)}"><span style="width:${Math.round(ratio * 100)}%"></span></div>`
+        : `<div class="job-progress indeterminate" role="progressbar" aria-label="Import progress"><span></span></div>`;
+      const count = total ? `${done} of ${total} posts` : `${done} posts checked`;
+      return `<div class="job-notice"><div class="job-main"><div class="job-line"><strong>${escapeHtml(job.target)}</strong><span>${escapeHtml(tail)}</span></div>${progress}<small>${escapeHtml(`${count} · ${timing}`)}</small></div><div class="job-actions">${controls}<button class="job-dismiss" data-dismiss-job="${escapeHtml(job.id)}" title="Dismiss"><i data-lucide="x"></i></button></div></div>`;
     })
     .join("");
   iconRefresh();
+}
+
+function formatJobDuration(seconds) {
+  const rounded = Math.max(0, Math.round(seconds));
+  const minutes = Math.floor(rounded / 60);
+  const remainder = rounded % 60;
+  if (minutes >= 60) return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
+  if (minutes) return `${minutes}m ${remainder}s`;
+  return `${remainder}s`;
+}
+
+function jobTiming(job) {
+  const started = Date.parse(job.created_at || "");
+  if (Number.isNaN(started)) return "Starting";
+  const elapsed = Math.max(0, (Date.now() - started) / 1000);
+  const done = Number(job.done || 0);
+  const total = Number(job.total || 0);
+  if (total && done > 0 && done < total) {
+    const remaining = (elapsed / done) * (total - done);
+    return `${formatJobDuration(elapsed)} elapsed · about ${formatJobDuration(remaining)} left`;
+  }
+  return `${formatJobDuration(elapsed)} elapsed`;
 }
 
 async function controlImportJob(jobId, action) {
@@ -1003,7 +1106,7 @@ function showShootMenu(shootId, x, y) {
   const menu = $("#shootMenu");
   menu.innerHTML = `<button class="asset-menu-action" data-rename-shoot><i data-lucide="pencil"></i><span>Rename board</span></button>
     <div class="asset-menu-divider"></div>
-    <button class="asset-menu-action handle-menu-delete" data-delete-shoot><i data-lucide="trash-2"></i><span>Delete board</span></button>`;
+    <button class="asset-menu-action handle-menu-delete" data-delete-shoot><span>Delete board</span></button>`;
   menu.hidden = false;
   const maxX = Math.max(10, window.innerWidth - menu.offsetWidth - 10);
   const maxY = Math.max(10, window.innerHeight - menu.offsetHeight - 10);
@@ -1066,7 +1169,7 @@ function showHandleMenu(handle, x, y) {
   const menu = $("#handleMenu");
   menu.innerHTML = `<button class="asset-menu-action" data-rename-handle><i data-lucide="pencil"></i><span>Rename photographer</span></button>
     <div class="asset-menu-divider"></div>
-    <button class="asset-menu-action handle-menu-delete" data-delete-handle><i data-lucide="trash-2"></i><span>Delete locally</span></button>`;
+    <button class="asset-menu-action handle-menu-delete" data-delete-handle><span>Delete locally</span></button>`;
   menu.hidden = false;
   const maxX = Math.max(10, window.innerWidth - menu.offsetWidth - 10);
   const maxY = Math.max(10, window.innerHeight - menu.offsetHeight - 10);
@@ -1156,8 +1259,8 @@ function showAssetMenu(id, x, y) {
   menu.hidden = false;
   const maxX = Math.max(10, window.innerWidth - menu.offsetWidth - 10);
   const maxY = Math.max(10, window.innerHeight - menu.offsetHeight - 10);
-  menu.style.left = `${Math.min(x, maxX)}px`;
-  menu.style.top = `${Math.min(y, maxY)}px`;
+  menu.style.left = `${Math.max(10, Math.min(x, maxX))}px`;
+  menu.style.top = `${Math.max(10, Math.min(y, maxY))}px`;
   renderInspector();
   iconRefresh();
 }
@@ -1208,11 +1311,12 @@ async function startFolderScan() {
   const handle = state.importMode === "post" ? $("#postDestination").value.trim() : $("#importHandle").value.trim();
   const path = $("#folderPath").value.trim();
   if (!path) throw new Error("Choose a local image folder first.");
-  await api("/api/import-folder", {
+  const result = await api("/api/import-folder", {
     method: "POST",
     body: JSON.stringify({ handle, path }),
   });
   $("#importDialog").close();
+  rememberJob(result.job);
   await loadJobs();
 }
 
@@ -1233,11 +1337,12 @@ async function startInstagramImport(profileValue = null) {
     payload.profile = source;
     payload.max_pages = maxPages ? Number(maxPages) : null;
   }
-  await api(endpoint, {
+  const result = await api(endpoint, {
     method: "POST",
     body: JSON.stringify(payload),
   });
   if ($("#importDialog").open) $("#importDialog").close();
+  rememberJob(result.job);
   await loadJobs();
 }
 
@@ -1294,8 +1399,8 @@ function bindEvents() {
     showShootMenu(button.dataset.shoot, event.clientX, event.clientY);
   });
 
-  $("#cullMode").addEventListener("click", toggleReview);
   $("#reviewToggle").addEventListener("click", toggleReview);
+  $("#sidebarToggle").addEventListener("click", () => setSidebarCollapsed(!state.sidebarCollapsed));
 
   $("#gridView").addEventListener("click", (event) => {
     const menuButton = event.target.closest("[data-asset-menu]");
@@ -1327,9 +1432,20 @@ function bindEvents() {
     closeFilterPopovers();
     render();
   });
-  $("#ratingSort").addEventListener("change", (event) => {
-    state.ratingSort = event.target.value;
+  $("#ratingSortButton").addEventListener("click", (event) => {
+    event.stopPropagation();
+    const popover = $("#ratingSortPopover");
+    const opening = popover.hidden;
+    closeFilterPopovers();
+    popover.hidden = !opening;
+    $("#ratingSortButton").setAttribute("aria-expanded", String(opening));
+  });
+  $("#ratingSortPopover").addEventListener("click", (event) => {
+    const option = event.target.closest("[data-rating-sort]");
+    if (!option) return;
+    state.ratingSort = option.dataset.ratingSort;
     if (state.ratingSort) clearRandomization();
+    closeFilterPopovers();
     render();
   });
   $("#colorFilterBar").addEventListener("click", (event) => {
@@ -1383,6 +1499,7 @@ function bindEvents() {
     state.selectedImportId = row.dataset.importHistory;
     renderImportHistory();
   });
+  $("#resumeImportBatch").addEventListener("click", () => resumeImportBatch().catch((error) => alert(error.message)));
   $("#deleteImportBatch").addEventListener("click", openDeleteImportDialog);
   $("#deleteImportForm").addEventListener("submit", (event) => {
     event.preventDefault();
@@ -1414,6 +1531,11 @@ function bindEvents() {
   $("#confirmReject").addEventListener("click", () => confirmCullReject().catch((error) => alert(error.message)));
 
   $("#inspector").addEventListener("click", (event) => {
+    if (event.target.closest("[data-inspector-favorite]")) {
+      const item = selectedItem();
+      if (item) toggleFavorite(item.id).catch((error) => alert(error.message));
+      return;
+    }
     const ratingButton = event.target.closest("[data-rating]");
     if (ratingButton) {
       const item = selectedItem();
@@ -1522,6 +1644,12 @@ function bindEvents() {
     });
   });
   $("#exitFocus").addEventListener("click", closeImageFocus);
+  $("#focusMenu").addEventListener("click", (event) => {
+    const itemId = state.focusId || state.selectedId;
+    if (!itemId) return;
+    const rect = event.currentTarget.getBoundingClientRect();
+    showAssetMenu(itemId, rect.right, rect.bottom);
+  });
   $("#focusPrevious").addEventListener("click", () => stepFocus(-1));
   $("#focusNext").addEventListener("click", () => stepFocus(1));
   $("#focusZoomInput").addEventListener("input", (event) => {
@@ -1535,7 +1663,7 @@ function bindEvents() {
     if (!event.target.closest("#assetMenu")) hideAssetMenu();
     if (!event.target.closest("#handleMenu")) hideHandleMenu();
     if (!event.target.closest("#shootMenu")) hideShootMenu();
-    if (!event.target.closest(".filter-popover") && !event.target.closest(".library-filter-actions")) closeFilterPopovers();
+    if (!event.target.closest(".filter-popover") && !event.target.closest(".library-filter-actions") && !event.target.closest(".rating-sort-menu")) closeFilterPopovers();
   });
 
   $("#inspector").addEventListener("input", (event) => {
@@ -1666,16 +1794,21 @@ async function init() {
     state.handleAliases = {};
   }
   document.title = state.libraryName;
+  state.sidebarCollapsed = localStorage.getItem("jade.sidebar-collapsed") === "true";
   ["--sidebar-width", "--inspector-width"].forEach((variable) => {
     const width = localStorage.getItem(panelStorageKeys[variable]);
     if (width) document.documentElement.style.setProperty(variable, width);
   });
   bindEvents();
+  setSidebarCollapsed(state.sidebarCollapsed);
   await loadConfig().catch(console.error);
   await loadShoots().catch(console.error);
   await loadLibrary({ keepSelection: false }).catch(console.error);
   await loadJobs().catch(console.error);
   setInterval(() => loadJobs().catch(console.error), 2200);
+  setInterval(() => {
+    if (state.jobs.some((job) => job.state === "running" || job.state === "paused")) renderJobs();
+  }, 1000);
   iconRefresh();
 }
 
